@@ -1,0 +1,6 @@
+data/
+logs/
+build/
+.torch_cache/
+.venv/
+__pycache__/

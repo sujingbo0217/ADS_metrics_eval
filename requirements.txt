@@ -1,0 +1,20 @@
+# ─── Always required (embed.py + pipeline.py core) ───────────────────────
+numpy>=1.24
+pillow>=10.0
+torch>=2.7          # CPU or GPU build
+torchvision>=0.15   # inception_v3, resnet50, vgg16 (for lpips_vgg)
+
+# ─── Required by specific extractors ─────────────────────────────────────
+# clip_vit_b32
+open_clip_torch>=2.20
+
+# lpips_vgg  (we do the PCA ourselves)
+scikit-learn>=1.3
+
+# segformer
+transformers>=4.30
+
+# ─── Required only by pipeline.py (k-NN / graph sweep) ───────────────────
+networkx>=3.0
+python-louvain>=0.16   # exposes module `community`
+scikit-learn>=1.3      # NMI / ARI (already listed above)
