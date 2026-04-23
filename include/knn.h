@@ -39,8 +39,8 @@ void free_knn_result(knnResult &res);
 // Barycenter shift: for each query, distance from query to centroid of its k-NN in base
 // Q: (n_q, dim), B: (n_b, dim), knn_indices: (n_q, k) from cross_set_knn
 void barycenter_shift(
-  const float* base, const float* query, int n_b, int n_q,
-  const int* neighbors, int k, int dim, float* output // (n_q, ) output, device memory
+  const float* base, const float* query, const int* neighbors, 
+  int n_q, int k, int dim, float* output // (n_q, ) output, device memory
 );
 
 // Neighborhood overlap: for real points, compare real-only k-NN vs pooled k-NN
@@ -68,9 +68,9 @@ void compute_indegree(
 // Build mutual k-NN graph in CSR format
 struct CSRGraph {
   int* row_ptr; // (row + 1, ) device memory
-  int* col_ptr; // (col, ) device memory
-  int row;
-  int col;
+  int* col_idx; // (nnz, ) device memory
+  int n;
+  int nnz;      // number of non-zero entries (total edges)
 };
 
 CSRGraph build_mutual_knn(const int* neighbors, int n, int k);
