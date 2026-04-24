@@ -1,5 +1,6 @@
-#include "knn.hpp"
-#include "utils.hpp"
+#include "knn.h"
+#include "utils.h"
+
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 // #include <cmath>
@@ -76,25 +77,26 @@ void pairwise_ip_dist(
   cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, n_b, n_q, dim, &alpha, base, dim, query, dim, &beta, dist, n_b);
 }
 
-// __global__ void l2_norm_kernel(float* X, int n, int dim) {
-//   int i = blockIdx.x * blockDim.x + threadIdx.x;
-//   if (i >= n) return;
-//   float sum = 0.0f;
-//   for (int d = 0; d < dim; d++) {
-//     float v = X[i * dim + d];
-//     sum += v * v;
-//   }
-//   float inv_norm = rsqrtf(fmaxf(sum, 1e-12));
-//   for (int d = 0; d < dim; d++) {
-//     X[i * dim + d] *= inv_norm;
-//   }
-// }
+// ─── Row-wise L2 normalization (in-place) ───
+__global__ void l2_normalize_rows_kernel(float* X, int n, int dim) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= n) return;
+  float sum = 0.0f;
+  for (int d = 0; d < dim; d++) {
+    float v = X[i * dim + d];
+    sum += v * v;
+  }
+  float inv_norm = rsqrtf(fmaxf(sum, 1e-12f));
+  for (int d = 0; d < dim; d++) {
+    X[i * dim + d] *= inv_norm;
+  }
+}
 
-// void l2_norm_rows(float* X, int n, int dim) {
-//   int block_size = 64;
-//   int grid_size = (n + block_size - 1) / block_size;
-//   l2_norm_kernel<<<grid_size, block_size>>>(X, n, dim);
-// }
+void l2_normalize_rows(float* X, int n, int dim) {
+  int block_size = 64;
+  int grid_size = (n + block_size - 1) / block_size;
+  l2_normalize_rows_kernel<<<grid_size, block_size>>>(X, n, dim);
+}
 
 __global__ void pairwise_mahalanobis_kernel(const float* base, const float* query, const float* inv_cov, float* dist, int n_b, int n_q, int dim) {
   int qi = blockIdx.y * blockDim.y + threadIdx.y;

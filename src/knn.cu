@@ -10,7 +10,7 @@ extern void pairwise_ip_dist(cublasHandle_t, const float*, const float*, int, in
 extern __global__ void pairwise_mahalanobis_kernel(const float*, const float*, const float*, float*, int, int, int);
 
 // declared in search.cu
-extern void topk_search_kernel(const float*, int*, float*, int, int, int, int);
+extern __global__ void topk_search_kernel(const float*, int*, float*, int, int, int, int);
 
 knnResult cross_set_knn(
   const float *base, const float *query, 

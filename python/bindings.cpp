@@ -37,7 +37,7 @@ static float* optional_inv_cov_to_device(py::object obj) {
 
 // ─── Cross-set k-NN ───
 // For each query in `query`, find k nearest neighbors in `base`.
-// Returns (indices, distances) of shape (n_q, k).
+// Returns (neighbors, distances) of shape (n_q, k).
 py::tuple py_cross_set_knn(
   py::array_t<float> base,    // (n_b, dim)
   py::array_t<float> query,   // (n_q, dim)
@@ -55,21 +55,21 @@ py::tuple py_cross_set_knn(
 
   knnResult res = cross_set_knn(d_base, d_query, n_b, n_q, dim, k, dist_type, d_inv_cov);
 
-  auto indices = py::array_t<int>({n_q, k});
+  auto neighbors = py::array_t<int>({n_q, k});
   auto distances = py::array_t<float>({n_q, k});
-  cudaMemcpy(indices.mutable_data(), res.indices, (size_t)n_q * k * sizeof(int), cudaMemcpyDeviceToHost);
+  cudaMemcpy(neighbors.mutable_data(), res.indices, (size_t)n_q * k * sizeof(int), cudaMemcpyDeviceToHost);
   cudaMemcpy(distances.mutable_data(), res.distances, (size_t)n_q * k * sizeof(float), cudaMemcpyDeviceToHost);
 
   free_knn_result(res);
   cudaFree(d_base);
   cudaFree(d_query);
   if (d_inv_cov) cudaFree(d_inv_cov);
-  return py::make_tuple(indices, distances);
+  return py::make_tuple(neighbors, distances);
 }
 
 // ─── Pooled k-NN ───
 // For each point in `mixed`, find k nearest neighbors in `mixed` (excluding self).
-// Returns (indices, distances) of shape (n, k).
+// Returns (neighbors, distances) of shape (n, k).
 py::tuple py_pooled_knn(
   py::array_t<float> mixed,   // (n, dim)
   int k, DistanceType dist_type,
@@ -83,15 +83,15 @@ py::tuple py_pooled_knn(
 
   knnResult res = pooled_knn(d_mixed, n, dim, k, dist_type, d_inv_cov);
 
-  auto indices = py::array_t<int>({n, k});
+  auto neighbors = py::array_t<int>({n, k});
   auto distances = py::array_t<float>({n, k});
-  cudaMemcpy(indices.mutable_data(), res.indices, (size_t)n * k * sizeof(int), cudaMemcpyDeviceToHost);
+  cudaMemcpy(neighbors.mutable_data(), res.indices, (size_t)n * k * sizeof(int), cudaMemcpyDeviceToHost);
   cudaMemcpy(distances.mutable_data(), res.distances, (size_t)n * k * sizeof(float), cudaMemcpyDeviceToHost);
 
   free_knn_result(res);
   cudaFree(d_mixed);
   if (d_inv_cov) cudaFree(d_inv_cov);
-  return py::make_tuple(indices, distances);
+  return py::make_tuple(neighbors, distances);
 }
 
 // ─── Barycenter shift ───
