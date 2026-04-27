@@ -18,7 +18,11 @@ transformers>=4.30
 networkx>=3.0
 python-louvain>=0.16   # exposes module `community`
 scipy>=1.11            # spearmanr (cross-space redundancy analysis)
-matplotlib>=3.7        # result visualization
+
+# ─── Visualization ───────────────────────────────────────────────────────
+matplotlib>=3.7
+plotly>=5.20           # interactive plots
+umap-learn>=0.5        # UMAP projection of embeddings
 
 # ─── Build (CUDA Python bindings) ────────────────────────────────────────
 pybind11>=2.11

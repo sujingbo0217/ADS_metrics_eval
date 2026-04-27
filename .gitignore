@@ -5,3 +5,4 @@ results/
 .torch_cache/
 .venv/
 __pycache__/
+.umap_cache/
