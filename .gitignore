@@ -1,7 +1,6 @@
 data/
 logs/
 build/
-results/
 .torch_cache/
 .venv/
 __pycache__/
