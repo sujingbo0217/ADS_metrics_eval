@@ -366,7 +366,7 @@ def run_from_fbins(
     k_values: List[int],
     output_dir: str,
 ) -> dict:
-    os.makedirs(output_dir, exist_ok=True)
+    # os.makedirs(output_dir, exist_ok=True)
 
     all_results: Dict[str, Dict[int, Dict[str, dict]]] = {}
 
@@ -429,7 +429,8 @@ def run_from_fbins(
         "k_sensitivity": k_sens,
     }
 
-    out_path = os.path.join(output_dir, "results.json")
+    # out_path = os.path.join(output_dir, "results.json")
+    out_path = output_dir
     with open(out_path, "w") as f:
         json.dump(output, f, indent=2)
     print(f"\nresults -> {out_path}")
@@ -461,7 +462,7 @@ def _print_summary_table(all_results: dict) -> None:
     print("SUMMARY")
     print(f"{'─' * 80}")
     header = (
-        f"{'Space':<14} {'k':>3} {'Level':<10} "
+        f"{'Space':<14} {'k':>3} {'Level':<32} "
         f"{'Bary':>8} {'LID':>8} {'Ovlp':>8} "
         f"{'NMI':>8} {'ARI':>8}"
     )
@@ -473,7 +474,7 @@ def _print_summary_table(all_results: dict) -> None:
             for level in sorted(all_results[space][k].keys()):
                 r = all_results[space][k][level]
                 print(
-                    f"{space:<14} {k:>3} {level:<10} "
+                    f"{space:<14} {k:>3} {level:<32} "
                     f"{r['baryshift_mean']:>8.4f} "
                     f"{r['lid_mean']:>8.2f} "
                     f"{r['overlap_mean']:>8.4f} "
@@ -512,8 +513,9 @@ def parse_args() -> argparse.Namespace:
         help="k values for k-NN.",
     )
     p.add_argument(
-        "--output-dir", default="results",
-        help="Directory to write results.json.",
+        "--output-dir", default="results/results.json",
+        help="Path to the JSON results file to write (treated as a file path, "
+             "not a directory).",
     )
     return p.parse_args()
 
