@@ -8,19 +8,19 @@ File format (little-endian):
 Two output modes
 ----------------
 
-1. Per-folder (default): one ``.fbin`` per (folder, extractor) pair.
+1. Per-folder (default): one ``.fbin`` per extractor written directly into
+   ``--output-dir``.  Run once per source folder; ``--folders`` accepts a
+   single entry in this mode.
 
     python embed.py \
-        --folders data/real data/fake_l1 data/fake_l2 \
-        --output-dir embeddings \
+        --folders /scratch/sim-real/gaussian_blur_level_1 \
+        --output-dir /scratch/jsu02/sim-real-embedding/kitti_gaussian_blur/level_1 \
         --extractors inception_v3 clip_vit_b32 pixel
 
-    embeddings/
-        real/inception_v3.fbin
-        real/clip_vit_b32.fbin
-        real/pixel.fbin
-        fake_l1/...
-        fake_l2/...
+    .../kitti_gaussian_blur/level_1/
+        inception_v3.fbin
+        clip_vit_b32.fbin
+        pixel.fbin
         manifest.json
 
 2. Pooled (``--pool``): images from all folders are concatenated in the
@@ -192,7 +192,8 @@ def parse_args() -> argparse.Namespace:
         help=(
             "pool all input folders into a single embedding set; writes "
             "{output_dir}/{extractor}.fbin (+ paths.txt + manifest.json). "
-            "Without this flag, each folder produces its own subdirectory."
+            "Without this flag, --folders must be a single folder and "
+            ".fbin files are written directly into --output-dir."
         ),
     )
     p.add_argument("--device", default="cuda")
@@ -249,40 +250,46 @@ def run_pooled(args: argparse.Namespace) -> int:
 
 
 def run_per_folder(args: argparse.Namespace) -> int:
+    if len(args.folders) != 1:
+        print(
+            f"per-folder mode expects exactly one --folders entry (got "
+            f"{len(args.folders)}); call embed.py once per source folder, or "
+            f"use --pool.",
+            file=sys.stderr,
+        )
+        return 2
+
     os.makedirs(args.output_dir, exist_ok=True)
-    manifest: Dict[str, dict] = {
+    folder = args.folders[0]
+    tag = os.path.basename(os.path.normpath(folder))
+    paths = list_images(folder)
+    if not paths:
+        print(f"[{tag}] no images found", file=sys.stderr)
+        return 1
+
+    print(f"\n[{tag}] {len(paths)} images  ->  {args.output_dir}")
+    results = run_extractors(
+        paths=paths,
+        extractors=args.extractors,
+        out_dir=args.output_dir,
+        output_root=args.output_dir,
+        device=args.device,
+        batch_size=args.batch_size,
+        overwrite=args.overwrite,
+        label=tag,
+    )
+
+    manifest = {
         "mode": "per_folder",
         "output_dir": os.path.abspath(args.output_dir),
         "device": args.device,
         "batch_size": args.batch_size,
         "extractors": args.extractors,
-        "folders": {},
+        "source_folder": os.path.abspath(folder),
+        "tag": tag,
+        "count": len(paths),
+        "embeddings": results,
     }
-
-    for folder in args.folders:
-        tag = os.path.basename(os.path.normpath(folder))
-        out_subdir = os.path.join(args.output_dir, tag)
-        paths = list_images(folder)
-        if not paths:
-            print(f"[{tag}] no images found, skipping", file=sys.stderr)
-            continue
-        print(f"\n[{tag}] {len(paths)} images  ->  {out_subdir}")
-        results = run_extractors(
-            paths=paths,
-            extractors=args.extractors,
-            out_dir=out_subdir,
-            output_root=args.output_dir,
-            device=args.device,
-            batch_size=args.batch_size,
-            overwrite=args.overwrite,
-            label=tag,
-        )
-        manifest["folders"][tag] = {
-            "source": os.path.abspath(folder),
-            "count": len(paths),
-            "embeddings": results,
-        }
-
     manifest_path = os.path.join(args.output_dir, "manifest.json")
     with open(manifest_path, "w") as f:
         json.dump(manifest, f, indent=2)

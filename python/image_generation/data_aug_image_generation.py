@@ -1,9 +1,12 @@
+<<<<<<< HEAD
 """
 This file creates commonly used augmented photo data for machine learning models.
 Techniques include:
 1. Gaussian Blur
 2. Gaussian Noise
-3. 
+3. Color Jitter
+4. Brightness
+5. Contrast
 
 Arguments:
 file-path - This should path to where the real images are and where you want to save them.
@@ -120,5 +123,4 @@ if __name__ == "__main__":
     contrast_func = T.ColorJitter(contrast=0.2)
     augment_images(input_image_path, output_image_path, "contrast_level_1", contrast_func)
     
-
 

@@ -1,0 +1,650 @@
+{
+  "config": {
+    "embeddings_dir": "/scratch/jsu02/sim-real-embedding",
+    "real_tag": "kitti_real",
+    "level_tags": [
+      "kitti_sim"
+    ],
+    "spaces": [
+      "inception_v3",
+      "clip_vit_b32",
+      "resnet50",
+      "lpips_vgg",
+      "pixel",
+      "segformer"
+    ],
+    "k_values": [
+      10,
+      20,
+      50
+    ]
+  },
+  "sweep": {
+    "inception_v3": {
+      "10": {
+        "kitti_sim": {
+          "baryshift_mean": 12.330333709716797,
+          "baryshift_std": 1.9211602210998535,
+          "baryshift_median": 12.35491943359375,
+          "lid_mean": 11.886274337768555,
+          "lid_std": 18.304523468017578,
+          "lid_median": 0.0,
+          "overlap_mean": 0.9875498414039612,
+          "overlap_std": 0.0653175562620163,
+          "indeg_real_mean": 9.905293961159883,
+          "indeg_real_std": 5.023840069873349,
+          "indeg_syn_mean": 10.03349012229539,
+          "indeg_syn_std": 4.443214170534253,
+          "nmi": 0.18814080496302849,
+          "ari": 0.006870136293474114,
+          "modularity": 0.9892363368597635,
+          "n_communities": 620,
+          "n_edges": 103709,
+          "time_seconds": 2.33
+        }
+      },
+      "20": {
+        "kitti_sim": {
+          "baryshift_mean": 12.075077056884766,
+          "baryshift_std": 1.8400343656539917,
+          "baryshift_median": 12.087577819824219,
+          "lid_mean": 9.593818664550781,
+          "lid_std": 14.094976425170898,
+          "lid_median": 0.0,
+          "overlap_mean": 0.9723531007766724,
+          "overlap_std": 0.09549306333065033,
+          "indeg_real_mean": 19.629156690609204,
+          "indeg_real_std": 12.14435042535061,
+          "indeg_syn_mean": 20.131138287864534,
+          "indeg_syn_std": 9.696466722858345,
+          "nmi": 0.20574328364340544,
+          "ari": 0.012827451596789654,
+          "modularity": 0.9763029235273577,
+          "n_communities": 275,
+          "n_edges": 194963,
+          "time_seconds": 3.66
+        }
+      },
+      "50": {
+        "kitti_sim": {
+          "baryshift_mean": 12.105358123779297,
+          "baryshift_std": 1.8921806812286377,
+          "baryshift_median": 12.101825714111328,
+          "lid_mean": 7.948990345001221,
+          "lid_std": 11.369097709655762,
+          "lid_median": 0.0,
+          "overlap_mean": 0.9412423372268677,
+          "overlap_std": 0.1356222778558731,
+          "indeg_real_mean": 48.5585262037776,
+          "indeg_real_std": 38.91794587123919,
+          "indeg_syn_mean": 50.509736594543746,
+          "indeg_syn_std": 28.364847622463532,
+          "nmi": 0.2227319948029237,
+          "ari": 0.02637229046611383,
+          "modularity": 0.9462770385544907,
+          "n_communities": 104,
+          "n_edges": 445944,
+          "time_seconds": 8.23
+        }
+      }
+    },
+    "clip_vit_b32": {
+      "10": {
+        "kitti_sim": {
+          "baryshift_mean": 0.5338971018791199,
+          "baryshift_std": 0.06650523841381073,
+          "baryshift_median": 0.5304536819458008,
+          "lid_mean": 0.0,
+          "lid_std": 0.0,
+          "lid_median": 0.0,
+          "overlap_mean": 0.9999201893806458,
+          "overlap_std": 0.003994411788880825,
+          "indeg_real_mean": 9.999201915403033,
+          "indeg_real_std": 4.7565918082893495,
+          "indeg_syn_mean": 10.000282220131703,
+          "indeg_syn_std": 4.814782028158418,
+          "nmi": 0.1900196112034376,
+          "ari": 0.006763935161098667,
+          "modularity": 0.9913994222563076,
+          "n_communities": 547,
+          "n_edges": 100649,
+          "time_seconds": 2.23
+        }
+      },
+      "20": {
+        "kitti_sim": {
+          "baryshift_mean": 0.532317042350769,
+          "baryshift_std": 0.0658126100897789,
+          "baryshift_median": 0.5291306972503662,
+          "lid_mean": 0.0,
+          "lid_std": 0.0,
+          "lid_median": 0.0,
+          "overlap_mean": 0.9998071193695068,
+          "overlap_std": 0.006746860686689615,
+          "indeg_real_mean": 19.99614259111466,
+          "indeg_real_std": 10.0023599778111,
+          "indeg_syn_mean": 20.001364063969895,
+          "indeg_syn_std": 9.749860602622062,
+          "nmi": 0.2078427518199366,
+          "ari": 0.011077932736312357,
+          "modularity": 0.9832148135881323,
+          "n_communities": 267,
+          "n_edges": 195955,
+          "time_seconds": 3.2
+        }
+      },
+      "50": {
+        "kitti_sim": {
+          "baryshift_mean": 0.5338120460510254,
+          "baryshift_std": 0.06544677913188934,
+          "baryshift_median": 0.5307203531265259,
+          "lid_mean": 0.0,
+          "lid_std": 0.0,
+          "lid_median": 0.0,
+          "overlap_mean": 0.9994093775749207,
+          "overlap_std": 0.01198883168399334,
+          "indeg_real_mean": 49.97206703910614,
+          "indeg_real_std": 30.099940240988325,
+          "indeg_syn_mean": 50.00987770460959,
+          "indeg_syn_std": 25.968089475555256,
+          "nmi": 0.23986679727572713,
+          "ari": 0.023191055321363608,
+          "modularity": 0.9619798610789355,
+          "n_communities": 100,
+          "n_edges": 467548,
+          "time_seconds": 6.84
+        }
+      }
+    },
+    "resnet50": {
+      "10": {
+        "kitti_sim": {
+          "baryshift_mean": 10.068106651306152,
+          "baryshift_std": 1.5245497226715088,
+          "baryshift_median": 9.997612953186035,
+          "lid_mean": 12.424642562866211,
+          "lid_std": 19.455608367919922,
+          "lid_median": 0.0,
+          "overlap_mean": 0.9983905553817749,
+          "overlap_std": 0.023439669981598854,
+          "indeg_real_mean": 9.984969406757116,
+          "indeg_real_std": 4.362670580280032,
+          "indeg_syn_mean": 10.005315145813734,
+          "indeg_syn_std": 4.167158700642073,
+          "nmi": 0.18870466084963022,
+          "ari": 0.00628358850322549,
+          "modularity": 0.9915917265907613,
+          "n_communities": 523,
+          "n_edges": 107013,
+          "time_seconds": 2.76
+        }
+      },
+      "20": {
+        "kitti_sim": {
+          "baryshift_mean": 9.987229347229004,
+          "baryshift_std": 1.5121079683303833,
+          "baryshift_median": 9.93928050994873,
+          "lid_mean": 9.720935821533203,
+          "lid_std": 14.405411720275879,
+          "lid_median": 0.0,
+          "overlap_mean": 0.9954242706298828,
+          "overlap_std": 0.041475508362054825,
+          "indeg_real_mean": 19.91779728651237,
+          "indeg_real_std": 10.144927446895581,
+          "indeg_syn_mean": 20.02906867356538,
+          "indeg_syn_std": 8.891596642570663,
+          "nmi": 0.20664836547939713,
+          "ari": 0.010408133705045423,
+          "modularity": 0.9837688128214319,
+          "n_communities": 245,
+          "n_edges": 203714,
+          "time_seconds": 3.64
+        }
+      },
+      "50": {
+        "kitti_sim": {
+          "baryshift_mean": 9.92399787902832,
+          "baryshift_std": 1.483759880065918,
+          "baryshift_median": 9.869529724121094,
+          "lid_mean": 7.699651718139648,
+          "lid_std": 11.156656265258789,
+          "lid_median": 0.0,
+          "overlap_mean": 0.9903671145439148,
+          "overlap_std": 0.06346263736486435,
+          "indeg_real_mean": 49.7072359670125,
+          "indeg_real_std": 31.15957654947625,
+          "indeg_syn_mean": 50.10352775164628,
+          "indeg_syn_std": 24.42188107864549,
+          "nmi": 0.2396047994310563,
+          "ari": 0.022917035897240052,
+          "modularity": 0.9617415302195893,
+          "n_communities": 106,
+          "n_edges": 480128,
+          "time_seconds": 7.13
+        }
+      }
+    },
+    "lpips_vgg": {
+      "10": {
+        "kitti_sim": {
+          "baryshift_mean": 6.599911212921143,
+          "baryshift_std": 1.4294003248214722,
+          "baryshift_median": 6.257846832275391,
+          "lid_mean": 15.346302032470703,
+          "lid_std": 23.568273544311523,
+          "lid_median": 3.949965000152588,
+          "overlap_mean": 0.9950252771377563,
+          "overlap_std": 0.041573766618967056,
+          "indeg_real_mean": 9.95291300877893,
+          "indeg_real_std": 3.6119891992741,
+          "indeg_syn_mean": 10.016650987770461,
+          "indeg_syn_std": 3.0982053005266064,
+          "nmi": 0.18741570236050245,
+          "ari": 0.005971988570773414,
+          "modularity": 0.9930501756937353,
+          "n_communities": 473,
+          "n_edges": 114836,
+          "time_seconds": 2.53
+        }
+      },
+      "20": {
+        "kitti_sim": {
+          "baryshift_mean": 6.41594123840332,
+          "baryshift_std": 1.4719187021255493,
+          "baryshift_median": 6.057521820068359,
+          "lid_mean": 11.405431747436523,
+          "lid_std": 15.950700759887695,
+          "lid_median": 3.6232423782348633,
+          "overlap_mean": 0.9739757776260376,
+          "overlap_std": 0.10045842081308365,
+          "indeg_real_mean": 19.520883213620642,
+          "indeg_real_std": 8.179486124500857,
+          "indeg_syn_mean": 20.16942615239887,
+          "indeg_syn_std": 7.02506507938995,
+          "nmi": 0.1988247345813366,
+          "ari": 0.008144325228714992,
+          "modularity": 0.9890528696585102,
+          "n_communities": 276,
+          "n_edges": 217450,
+          "time_seconds": 4.03
+        }
+      },
+      "50": {
+        "kitti_sim": {
+          "baryshift_mean": 6.309083938598633,
+          "baryshift_std": 1.4913110733032227,
+          "baryshift_median": 5.971155643463135,
+          "lid_mean": 8.432723999023438,
+          "lid_std": 10.477231979370117,
+          "lid_median": 3.6808156967163086,
+          "overlap_mean": 0.9098324179649353,
+          "overlap_std": 0.1973235309123993,
+          "indeg_real_mean": 46.2220005320564,
+          "indeg_real_std": 24.94229701761709,
+          "indeg_syn_mean": 51.335983066792096,
+          "indeg_syn_std": 21.685884047717302,
+          "nmi": 0.22055508379785188,
+          "ari": 0.015115127212662656,
+          "modularity": 0.976935132951079,
+          "n_communities": 150,
+          "n_edges": 502896,
+          "time_seconds": 6.63
+        }
+      }
+    },
+    "pixel": {
+      "10": {
+        "kitti_sim": {
+          "baryshift_mean": 11.694232940673828,
+          "baryshift_std": 3.1309194564819336,
+          "baryshift_median": 11.732828140258789,
+          "lid_mean": 9.223736763000488,
+          "lid_std": 17.720792770385742,
+          "lid_median": 0.0,
+          "overlap_mean": 0.899787187576294,
+          "overlap_std": 0.21928797662258148,
+          "indeg_real_mean": 9.043229582335728,
+          "indeg_real_std": 6.351533094490217,
+          "indeg_syn_mean": 10.338334901222954,
+          "indeg_syn_std": 4.827325779297337,
+          "nmi": 0.18543061966540184,
+          "ari": 0.00627767126869831,
+          "modularity": 0.9915564287771009,
+          "n_communities": 723,
+          "n_edges": 99921,
+          "time_seconds": 3.04
+        }
+      },
+      "20": {
+        "kitti_sim": {
+          "baryshift_mean": 11.447525978088379,
+          "baryshift_std": 3.2284295558929443,
+          "baryshift_median": 11.343976974487305,
+          "lid_mean": 6.977023124694824,
+          "lid_std": 12.683198928833008,
+          "lid_median": 0.0,
+          "overlap_mean": 0.8276004791259766,
+          "overlap_std": 0.2851722538471222,
+          "indeg_real_mean": 16.737962223995744,
+          "indeg_real_std": 13.660331386009204,
+          "indeg_syn_mean": 21.153527751646283,
+          "indeg_syn_std": 12.449761480936193,
+          "nmi": 0.18722361195693998,
+          "ari": 0.008908860435840401,
+          "modularity": 0.9859234262854402,
+          "n_communities": 465,
+          "n_edges": 174919,
+          "time_seconds": 3.69
+        }
+      },
+      "50": {
+        "kitti_sim": {
+          "baryshift_mean": 11.265413284301758,
+          "baryshift_std": 3.2466771602630615,
+          "baryshift_median": 11.237632751464844,
+          "lid_mean": 5.303345680236816,
+          "lid_std": 8.023550987243652,
+          "lid_median": 0.0,
+          "overlap_mean": 0.7236844897270203,
+          "overlap_std": 0.3371446132659912,
+          "indeg_real_mean": 37.13594040968343,
+          "indeg_real_std": 34.07471695136171,
+          "indeg_syn_mean": 54.54901222953904,
+          "indeg_syn_std": 39.45576248516601,
+          "nmi": 0.1976926987196454,
+          "ari": 0.0157548135394407,
+          "modularity": 0.9753237103281125,
+          "n_communities": 253,
+          "n_edges": 381175,
+          "time_seconds": 5.87
+        }
+      }
+    },
+    "segformer": {
+      "10": {
+        "kitti_sim": {
+          "baryshift_mean": 10.463032722473145,
+          "baryshift_std": 1.0502705574035645,
+          "baryshift_median": 10.44485092163086,
+          "lid_mean": 14.362339973449707,
+          "lid_std": 21.801250457763672,
+          "lid_median": 0.0,
+          "overlap_mean": 0.9999468326568604,
+          "overlap_std": 0.00461296271532774,
+          "indeg_real_mean": 9.999467943602022,
+          "indeg_real_std": 4.4382194270748245,
+          "indeg_syn_mean": 10.000188146754468,
+          "indeg_syn_std": 3.53144721577286,
+          "nmi": 0.19716409105981306,
+          "ari": 0.008087886070133153,
+          "modularity": 0.988386368858841,
+          "n_communities": 352,
+          "n_edges": 110452,
+          "time_seconds": 2.25
+        }
+      },
+      "20": {
+        "kitti_sim": {
+          "baryshift_mean": 10.391439437866211,
+          "baryshift_std": 1.0481321811676025,
+          "baryshift_median": 10.38296890258789,
+          "lid_mean": 11.024203300476074,
+          "lid_std": 15.979793548583984,
+          "lid_median": 0.0,
+          "overlap_mean": 0.9999068379402161,
+          "overlap_std": 0.006047330796718597,
+          "indeg_real_mean": 19.998137802607076,
+          "indeg_real_std": 10.250221248264161,
+          "indeg_syn_mean": 20.00065851364064,
+          "indeg_syn_std": 7.4011770655635285,
+          "nmi": 0.22003515364319587,
+          "ari": 0.014828071306723697,
+          "modularity": 0.9750559983383262,
+          "n_communities": 172,
+          "n_edges": 213196,
+          "time_seconds": 3.73
+        }
+      },
+      "50": {
+        "kitti_sim": {
+          "baryshift_mean": 10.466377258300781,
+          "baryshift_std": 1.0775249004364014,
+          "baryshift_median": 10.47516918182373,
+          "lid_mean": 8.665581703186035,
+          "lid_std": 12.277691841125488,
+          "lid_median": 0.0,
+          "overlap_mean": 0.9993828535079956,
+          "overlap_std": 0.015263651497662067,
+          "indeg_real_mean": 49.96914072891727,
+          "indeg_real_std": 31.95958982585362,
+          "indeg_syn_mean": 50.01091251175917,
+          "indeg_syn_std": 20.714891944531722,
+          "nmi": 0.2561825708955676,
+          "ari": 0.032406669252437945,
+          "modularity": 0.9438986523668947,
+          "n_communities": 77,
+          "n_edges": 504144,
+          "time_seconds": 7.67
+        }
+      }
+    }
+  },
+  "cross_space_redundancy": {
+    "spearman": {
+      "baryshift_mean": {},
+      "lid_mean": {},
+      "overlap_mean": {},
+      "indeg_real_mean": {},
+      "indeg_syn_mean": {},
+      "nmi": {},
+      "ari": {}
+    },
+    "k_used": 10
+  },
+  "k_sensitivity": {
+    "inception_v3": {
+      "baryshift_mean": {
+        "k_values": [
+          10,
+          20,
+          50
+        ],
+        "cv_across_k": 0.009355997607162297
+      },
+      "lid_mean": {
+        "k_values": [
+          10,
+          20,
+          50
+        ],
+        "cv_across_k": 0.16459445723169244
+      },
+      "overlap_mean": {
+        "k_values": [
+          10,
+          20,
+          50
+        ],
+        "cv_across_k": 0.019930218385586892
+      },
+      "nmi": {
+        "k_values": [
+          10,
+          20,
+          50
+        ],
+        "cv_across_k": 0.06870986083422659
+      }
+    },
+    "clip_vit_b32": {
+      "baryshift_mean": {
+        "k_values": [
+          10,
+          20,
+          50
+        ],
+        "cv_across_k": 0.0013605352138733164
+      },
+      "lid_mean": {
+        "k_values": [
+          10,
+          20,
+          50
+        ],
+        "cv_across_k": 0.0
+      },
+      "overlap_mean": {
+        "k_values": [
+          10,
+          20,
+          50
+        ],
+        "cv_across_k": 0.0002191297825792179
+      },
+      "nmi": {
+        "k_values": [
+          10,
+          20,
+          50
+        ],
+        "cv_across_k": 0.09701672581057082
+      }
+    },
+    "resnet50": {
+      "baryshift_mean": {
+        "k_values": [
+          10,
+          20,
+          50
+        ],
+        "cv_across_k": 0.005901965047158061
+      },
+      "lid_mean": {
+        "k_values": [
+          10,
+          20,
+          50
+        ],
+        "cv_across_k": 0.19457019259673702
+      },
+      "overlap_mean": {
+        "k_values": [
+          10,
+          20,
+          50
+        ],
+        "cv_across_k": 0.0033299802813254883
+      },
+      "nmi": {
+        "k_values": [
+          10,
+          20,
+          50
+        ],
+        "cv_across_k": 0.0995925535526177
+      }
+    },
+    "lpips_vgg": {
+      "baryshift_mean": {
+        "k_values": [
+          10,
+          20,
+          50
+        ],
+        "cv_across_k": 0.018646304214701866
+      },
+      "lid_mean": {
+        "k_values": [
+          10,
+          20,
+          50
+        ],
+        "cv_across_k": 0.24144181048006208
+      },
+      "overlap_mean": {
+        "k_values": [
+          10,
+          20,
+          50
+        ],
+        "cv_across_k": 0.03775768669569304
+      },
+      "nmi": {
+        "k_values": [
+          10,
+          20,
+          50
+        ],
+        "cv_across_k": 0.06796069138127157
+      }
+    },
+    "pixel": {
+      "baryshift_mean": {
+        "k_values": [
+          10,
+          20,
+          50
+        ],
+        "cv_across_k": 0.015321720146710746
+      },
+      "lid_mean": {
+        "k_values": [
+          10,
+          20,
+          50
+        ],
+        "cv_across_k": 0.22407562528130456
+      },
+      "overlap_mean": {
+        "k_values": [
+          10,
+          20,
+          50
+        ],
+        "cv_across_k": 0.08846931591808013
+      },
+      "nmi": {
+        "k_values": [
+          10,
+          20,
+          50
+        ],
+        "cv_across_k": 0.028443521061241022
+      }
+    },
+    "segformer": {
+      "baryshift_mean": {
+        "k_values": [
+          10,
+          20,
+          50
+        ],
+        "cv_across_k": 0.003310704442060195
+      },
+      "lid_mean": {
+        "k_values": [
+          10,
+          20,
+          50
+        ],
+        "cv_across_k": 0.2059010956818159
+      },
+      "overlap_mean": {
+        "k_values": [
+          10,
+          20,
+          50
+        ],
+        "cv_across_k": 0.00025702017059375516
+      },
+      "nmi": {
+        "k_values": [
+          10,
+          20,
+          50
+        ],
+        "cv_across_k": 0.10824417334619788
+      }
+    }
+  }
+}
