@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 """
 This file creates commonly used augmented photo data for machine learning models.
 Techniques include:
