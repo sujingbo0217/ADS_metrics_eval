@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """plot.py — UMAP visualization of pre-computed image embeddings.
 
-Per embedding space (extractor) the script produces three figures
-(file extension follows ``--format``: png by default, also pdf / svg):
+Per embedding space (extractor) the script produces one figure per
+scenario (file extension follows ``--format``: png by default, also pdf
+/ svg):
 
 1. ``real_vs_sim.<ext>`` — 1x2 panels
        [0] Real only
        [1] Real + Sim   (sim drawn on top of real)
 
-2. ``kitti_gaussian_blur.<ext>`` — 2x2 panels (progressive overlay)
+2. ``<degradation>.<ext>`` — 2x2 panels (progressive overlay), one
+   figure per degradation type under ``DEGRADATION_TYPES``
+   (gaussian_blur, gaussian_noise, brightness, contrast, color_jitter):
        [0] Real only
        [1] Real + Level 1
        [2] Real + Level 1 + Level 2
        [3] Real + Level 1 + Level 2 + Level 3
-
-3. ``kitti_gaussian_noise.<ext>`` — 2x2 panels (same scheme as blur)
 
 A single UMAP is fit per figure on the *union* of all points so that the
 spatial layout is consistent across panels and the user can see how the
@@ -22,18 +23,19 @@ distribution drifts level by level.
 
 Optional ``--sweep`` mode performs a grid search over ``n_neighbors`` x
 ``min_dist`` and saves one sweep figure per scenario per extractor
-(``sweep_real_vs_sim.<ext>``, ``sweep_kitti_gaussian_blur.<ext>``,
-``sweep_kitti_gaussian_noise.<ext>``). Each cell shows the fully-overlaid
-view (real + sim, or real + all blur levels, or real + all noise levels)
-under one (n_neighbors, min_dist) combo — useful for parameter tuning.
+(``sweep_real_vs_sim.<ext>``, ``sweep_<degradation>.<ext>``). Each cell
+shows the fully-overlaid view (real + sim, or real + all degradation
+levels) under one (n_neighbors, min_dist) combo — useful for parameter
+tuning.
 
-Optional ``--compare-extractors`` mode produces a single 3 x N overview
+Optional ``--compare-extractors`` mode produces a single S x N overview
 figure (rows = scenario, cols = extractor) where each cell shows only the
-fully-covered panel — Real + Sim, Real + Blur (L1+L2+L3), and
-Real + Noise (L1+L2+L3) — so all three scenarios across all extractors
-fit in one image. Each cell uses its own UMAP fit / axis limits since
-different extractors live in different vector spaces — this is *not* a
-joint projection across extractors, just a side-by-side layout for visual
+fully-covered panel — Real + Sim, and Real + <degradation> (L1+L2+L3)
+for every degradation type — so all scenarios across all extractors fit
+in one image. With the default scenario / extractor sets this is a 6x6
+grid. Each cell uses its own UMAP fit / axis limits since different
+extractors live in different vector spaces — this is *not* a joint
+projection across extractors, just a side-by-side layout for visual
 comparison. Output goes to ``<output-dir>/compare/overview.<ext>``.
 
 UMAP projections are cached transparently to ``<output-dir>/.umap_cache``
@@ -51,6 +53,9 @@ Layout assumed under ``--base-dir`` (matches ``embed.py`` outputs):
         kitti_sim/<extractor>.fbin
         kitti_gaussian_blur/level_{1,2,3}/<extractor>.fbin
         kitti_gaussian_noise/level_{1,2,3}/<extractor>.fbin
+        kitti_bright/level_{1,2,3}/<extractor>.fbin
+        kitti_contrast/level_{1,2,3}/<extractor>.fbin
+        kitti_color_jitter/level_{1,2,3}/<extractor>.fbin
 
 Recommended workflow — sweep first, then compare-extractors:
 
@@ -66,7 +71,7 @@ Recommended workflow — sweep first, then compare-extractors:
 
     python python/visualization/plot.py \
         --base-dir /scratch/jsu02/sim-real-embedding \
-        --output-dir figures/result \
+        --output-dir figures/virtualization \
         --extractors inception_v3 clip_vit_b32 resnet50 lpips_vgg pixel segformer \
         --n-neighbors 20 --min-dist 0.3 \
         --subsample 4000 \
@@ -134,10 +139,15 @@ ALPHA = 0.5
 POINT_SIZE = 8
 SEED = 42
 
-# (subdir, human-readable label)
+# (subdir, human-readable label, short label for compare overview row).
+# Order here drives the row order of the cross-extractor compare grid
+# (real_vs_sim is always the first row).
 DEGRADATION_TYPES = [
-    ("kitti_gaussian_blur",  "Gaussian Blur"),
-    ("kitti_gaussian_noise", "Gaussian Noise"),
+    ("kitti_gaussian_blur",  "Gaussian Blur",  "Blur"),
+    ("kitti_gaussian_noise", "Gaussian Noise", "Noise"),
+    ("kitti_bright",         "Brightness",     "Bright"),
+    ("kitti_contrast",       "Contrast",       "Contrast"),
+    ("kitti_color_jitter",   "Color Jitter",   "ColorJitter"),
 ]
 
 
@@ -545,19 +555,22 @@ def render_compare_overview(
     """Single overview grid: rows = scenarios, cols = extractors.
 
     Each cell shows only the fully-covered panel of its scenario:
-    Real + Sim for ``real_vs_sim``, and Real + L1 + L2 + L3 for the
-    progressive blur / noise scenarios. With 3 scenarios and 6
-    extractors this produces a 3x6 grid that captures every
-    distribution-shift view in a single figure.
+    Real + Sim for ``real_vs_sim``, and Real + L1 + L2 + L3 for every
+    progressive degradation in ``DEGRADATION_TYPES``. With the default
+    6 scenarios (sim + 5 degradations) and 6 extractors this produces a
+    6x6 grid that captures every distribution-shift view in a single
+    figure.
 
     Each cell uses its own xlim/ylim because every extractor's UMAP fit
     lives in its own coordinate system; this is a side-by-side layout,
     not a joint projection across extractors.
     """
     scenarios: List[Tuple[str, str]] = [
-        ("real_vs_sim",          "Real + Sim"),
-        ("kitti_gaussian_blur",  "Real + Blur\n(L1+L2+L3)"),
-        ("kitti_gaussian_noise", "Real + Noise\n(L1+L2+L3)"),
+        ("real_vs_sim", "Real + Sim"),
+        *[
+            (subdir, f"Real + {short}\n(L1+L2+L3)")
+            for subdir, _label, short in DEGRADATION_TYPES
+        ],
     ]
 
     available = [
@@ -824,9 +837,8 @@ def main() -> int:
 
     # scenario_key -> extractor -> panels (used for cross-extractor compare).
     panels_cache: "dict[str, dict[str, Panels]]" = {
-        "real_vs_sim":          {},
-        "kitti_gaussian_blur":  {},
-        "kitti_gaussian_noise": {},
+        "real_vs_sim": {},
+        **{subdir: {} for subdir, _label, _short in DEGRADATION_TYPES},
     }
 
     for extractor in args.extractors:
@@ -900,7 +912,7 @@ def main() -> int:
         # the per-extractor progressive figure and the parameter sweep.
         degradation_levels: "dict[str, List[np.ndarray]]" = {}
         if not args.skip_degradation or args.sweep:
-            for subdir, _label in DEGRADATION_TYPES:
+            for subdir, _label, _short in DEGRADATION_TYPES:
                 levels = _gather_levels(
                     args.base_dir, subdir, extractor,
                     subsample=args.subsample, rng=rng,
@@ -909,7 +921,7 @@ def main() -> int:
                     degradation_levels[subdir] = levels
 
         if not args.skip_degradation:
-            for subdir, label in DEGRADATION_TYPES:
+            for subdir, label, _short in DEGRADATION_TYPES:
                 levels = degradation_levels.get(subdir)
                 if levels is None:
                     continue
@@ -966,7 +978,7 @@ def main() -> int:
                     f"sweep_real_vs_sim.{args.format}",
                     [("Sim", sim)],
                 ))
-            for subdir, label in DEGRADATION_TYPES:
+            for subdir, label, _short in DEGRADATION_TYPES:
                 levels = degradation_levels.get(subdir)
                 if levels is None:
                     continue

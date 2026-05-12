@@ -32,8 +32,14 @@ REAL="kitti_real"
 SYN="kitti_sim"
 BLUR="kitti_gaussian_blur"
 NOISE="kitti_gaussian_noise"
+JITTER="kitti_color_jitter"
+BRIGHT="kitti_bright"
+CONTRAST="kitti_contrast"
 BLUR_LEVELS=( "$BLUR/level_1"  "$BLUR/level_2"  "$BLUR/level_3"  )
 NOISE_LEVELS=( "$NOISE/level_1" "$NOISE/level_2" "$NOISE/level_3" )
+JITTER_LEVELS=( "$JITTER/level_1" "$JITTER/level_2" "$JITTER/level_3" )
+BRIGHT_LEVELS=( "$BRIGHT/level_1" "$BRIGHT/level_2" "$BRIGHT/level_3" )
+CONTRAST_LEVELS=( "$CONTRAST/level_1" "$CONTRAST/level_2" "$CONTRAST/level_3" )
 
 ALL_SPACES=( inception_v3 clip_vit_b32 resnet50 lpips_vgg pixel segformer )
 K_VALUES=( 10 20 50 )
@@ -93,21 +99,13 @@ run_pipeline() {
     echo "EMB_DIR : $EMB_DIR"
 } | tee -a "$LOG_FILE"
 
+run_pipeline "real only (baseline)"   "$RESULTS_DIR/result_real.json"  "$REAL"
 run_pipeline "real vs sim"            "$RESULTS_DIR/result_sim.json"   "$SYN"
 run_pipeline "real vs gaussian blur"  "$RESULTS_DIR/result_blur.json"  "${BLUR_LEVELS[@]}"
 run_pipeline "real vs gaussian noise" "$RESULTS_DIR/result_noise.json" "${NOISE_LEVELS[@]}"
+run_pipeline "real vs color jitter" "$RESULTS_DIR/result_color_jitter.json" "${JITTER_LEVELS[@]}"
+run_pipeline "real vs bright" "$RESULTS_DIR/result_bright.json" "${BRIGHT_LEVELS[@]}"
+run_pipeline "real vs contrast" "$RESULTS_DIR/result_contrast.json" "${CONTRAST_LEVELS[@]}"
 
 step "Done!"
 echo "Results saved in: $RESULTS_DIR"
-for f in \
-    "$RESULTS_DIR/result_sim.json" \
-    "$RESULTS_DIR/result_blur.json" \
-    "$RESULTS_DIR/result_noise.json"
-do
-    [ -f "$f" ] && echo "  - $f"
-done
-
-echo ""
-echo "To inspect a result file:"
-echo "  python -c \"import json,sys; r=json.load(open(sys.argv[1])); print(json.dumps(r['sweep'], indent=2))\" \\"
-echo "    $RESULTS_DIR/result_sim.json"

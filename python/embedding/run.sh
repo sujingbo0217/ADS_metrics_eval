@@ -61,3 +61,60 @@ python embed.py \
     --output-dir /scratch/jsu02/sim-real-embedding/kitti_gaussian_noise/level_3 \
     --extractors inception_v3 clip_vit_b32 resnet50 lpips_vgg segformer pixel \
     --batch-size 512 --device cuda 
+
+# ─── Generated image data embedding (color jitter) ───────────────────────────────────────────
+python embed.py \
+    --folders /scratch/sim-real/color_jitter_level_1 \
+    --output-dir /scratch/jsu02/sim-real-embedding/kitti_color_jitter/level_1 \
+    --extractors inception_v3 clip_vit_b32 resnet50 lpips_vgg segformer pixel \
+    --batch-size 512 --device cuda 
+
+python embed.py \
+    --folders /scratch/sim-real/color_jitter_level_2 \
+    --output-dir /scratch/jsu02/sim-real-embedding/kitti_color_jitter/level_2 \
+    --extractors inception_v3 clip_vit_b32 resnet50 lpips_vgg segformer pixel \
+    --batch-size 512 --device cuda 
+
+python embed.py \
+    --folders /scratch/sim-real/color_jitter_level_3 \
+    --output-dir /scratch/jsu02/sim-real-embedding/kitti_color_jitter/level_3 \
+    --extractors inception_v3 clip_vit_b32 resnet50 lpips_vgg segformer pixel \
+    --batch-size 512 --device cuda 
+
+# ─── Generated image data embedding (bright) ───────────────────────────────────────────
+python embed.py \
+    --folders /scratch/sim-real/bright_level_1 \
+    --output-dir /scratch/jsu02/sim-real-embedding/kitti_bright/level_1 \
+    --extractors inception_v3 clip_vit_b32 resnet50 lpips_vgg segformer pixel \
+    --batch-size 512 --device cuda 
+
+python embed.py \
+    --folders /scratch/sim-real/bright_level_2 \
+    --output-dir /scratch/jsu02/sim-real-embedding/kitti_bright/level_2 \
+    --extractors inception_v3 clip_vit_b32 resnet50 lpips_vgg segformer pixel \
+    --batch-size 512 --device cuda 
+
+python embed.py \
+    --folders /scratch/sim-real/bright_level_3 \
+    --output-dir /scratch/jsu02/sim-real-embedding/kitti_bright/level_3 \
+    --extractors inception_v3 clip_vit_b32 resnet50 lpips_vgg segformer pixel \
+    --batch-size 512 --device cuda 
+
+# ─── Generated image data embedding (contrast) ───────────────────────────────────────────
+python embed.py \
+    --folders /scratch/sim-real/contrast_level_1 \
+    --output-dir /scratch/jsu02/sim-real-embedding/kitti_contrast/level_1 \
+    --extractors inception_v3 clip_vit_b32 resnet50 lpips_vgg segformer pixel \
+    --batch-size 512 --device cuda 
+
+python embed.py \
+    --folders /scratch/sim-real/contrast_level_2 \
+    --output-dir /scratch/jsu02/sim-real-embedding/kitti_contrast/level_2 \
+    --extractors inception_v3 clip_vit_b32 resnet50 lpips_vgg segformer pixel \
+    --batch-size 512 --device cuda 
+
+python embed.py \
+    --folders /scratch/sim-real/contrast_level_3 \
+    --output-dir /scratch/jsu02/sim-real-embedding/kitti_contrast/level_3 \
+    --extractors inception_v3 clip_vit_b32 resnet50 lpips_vgg segformer pixel \
+    --batch-size 512 --device cuda 
