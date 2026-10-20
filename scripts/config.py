@@ -13,11 +13,8 @@ ROBODEPTH_REPO = REPO_ROOT / "RoboDepth"
 KITTI_EVAL_REPO = REPO_ROOT / "kitti-object-eval-python"
 MMDET3D_REPO = REPO_ROOT / "mmdetection3d"
 
-# mmdet3d-standard KITTI root (symlink farm + kitti_infos_*.pkl from
-# tools/create_data.py). Its training/image_2 points at the CLEAN images; the
-# per-condition roots built by eval_det.py reuse everything else from here.
+
 KITTI_STD_ROOT = KITTI_OBJ / "working"
-# Per-condition symlink roots for mono3D (one per degradation/severity).
 COND_ROOTS = ROOT / "cond_roots"
 
 CITYSCAPES = Path("/scratch/jsu02/cityscapes")      # leftImg8bit/ and gtFine/ (change on your machine)
@@ -45,7 +42,6 @@ EIGEN_TEST_LIST = MONODEPTH2_REPO / "splits/eigen/test_files.txt"
 # -----------------------------------------------------------------------------
 # CONDITIONS
 # -----------------------------------------------------------------------------
-# RoboDepth 18-degradation suite (ImageNet-C convention), 5 severities each.
 DEGRADATIONS = [
     "gaussian_noise", "shot_noise", "impulse_noise", "iso_noise",          # noise
     "defocus_blur", "glass_blur", "motion_blur", "zoom_blur",              # blur
@@ -56,7 +52,6 @@ DEGRADATIONS = [
 SEVERITIES = [1, 2, 3, 4, 5]
 CLEAN = ("clean", 0)
 
-# Mapping to the old paper's 5 transformation families (for the narrative table)
 OLD_FAMILY_MAP = {
     "gaussian_noise": "noise", "shot_noise": "noise", "impulse_noise": "noise",
     "iso_noise": "noise",
@@ -77,8 +72,51 @@ def all_conditions():
 
 
 # -----------------------------------------------------------------------------
-# TASKS & IMAGE SETS
+# DATASETS -> TASKS -> MODELS
 # -----------------------------------------------------------------------------
+
+DATASETS = {
+    "kitti_det":   "det",          # KITTI-object val, 3769 images
+    "kitti_seg":   "seg",          # KITTI-200 semantics, 200 images
+    "cityscapes":  "cityscapes",   # Cityscapes val, 500 images
+    "kitti_depth": "depth",        # KITTI Eigen test, 697 images
+}
+
+
+MODELS = {
+    "SMOKE":       dict(task="detection",    dataset="kitti_det",
+                        perf="mono3d_smoke", score="ap3d_mod_r40", higher_better=True),
+    "PGD":         dict(task="detection",    dataset="kitti_det",
+                        perf="mono3d_pgd", score="ap3d_mod_r40", higher_better=True),
+    "DeepLabV3+":  dict(task="segmentation", dataset="cityscapes",
+                        perf="seg_deeplabv3plus_r101", score="miou", higher_better=True),
+    "Mask2Former": dict(task="segmentation", dataset="cityscapes",
+                        perf="seg_mask2former_swinl", score="miou", higher_better=True),
+    "DLv3+/KITTI": dict(task="segmentation", dataset="kitti_seg",
+                        perf="seg_deeplabv3plus_r101_kitti200", score="miou", higher_better=True),
+    "Monodepth2":  dict(task="depth",        dataset="kitti_depth",
+                        perf="depth_monodepth2", score="abs_rel", higher_better=False),
+    "MD2 mono+st": dict(task="depth",        dataset="kitti_depth",
+                        perf="depth_mono_stereo", score="abs_rel", higher_better=False),
+}
+
+
+DISTRIBUTION_METRICS = {"FID": +1, "KID": +1, "FD@DINOv2": +1, "KD@DINOv2": +1}
+
+IMAGE_METRICS = {
+    "Cos@Inc": -1, "CLIP-sim": -1, "Cos@VGG": -1, "LPIPS": +1, "CPL": +1,
+    "SSS": +1, "SSIM": -1, "MSE": +1, "TSI": +1, "WD": +1, "KL": +1,
+    "HistI": -1,
+}
+METRICS = {**DISTRIBUTION_METRICS, **IMAGE_METRICS}
+
+IMAGE_DATASETS = ["kitti_seg", "cityscapes", "kitti_depth"]
+
+
+def models_on(dataset):
+    return [m for m, d in MODELS.items() if d["dataset"] == dataset]
+
+
 TASKS = ["det", "seg", "depth", "cityscapes"]
 METRIC_POOL_TASK = "det"
 
@@ -154,10 +192,6 @@ def robodepth_path(image_id, degradation, severity):
 
 _CS_INDEX = None
 def _cs_index():
-    """
-    image_id -> clean (val = 500)
-    image_id = '<city>_<seq>_<frame>'
-    """
     global _CS_INDEX
     if _CS_INDEX is None:
         d = CITYSCAPES / "leftImg8bit" / CITYSCAPES_SPLIT
@@ -177,11 +211,6 @@ def cityscapes_gt_path(image_id, kind="labelTrainIds"):
 SPACES = ["inception_v3", "clip_vitb32", "resnet50", "vgg_lpips", 
             "alexnet_lpips", "pixel", "segformer", "dinov2_vitl14"]
 
-# Which training objective each space was optimised for. This, not the count of
-# spaces, is what controls how much independent evidence the pool carries: four
-# ImageNet-supervised CNNs are largely redundant with one another, whereas CLIP,
-# DINOv2 and SegFormer each bring a genuinely different objective. Used to keep
-# the confirmatory metric family objective-diverse rather than merely large.
 SPACE_OBJECTIVE = {
     "inception_v3":  "imagenet-supervised",
     "resnet50":      "imagenet-supervised",
@@ -208,7 +237,8 @@ PIXEL_SIZE = (64, 212)
 # -----------------------------------------------------------------------------
 DIRECTION = {
     "fid": +1, "kid": +1, "frechet": +1, "mmd": +1,
-    "ssim": -1, "psnr": -1, "mse": +1, "lpips": +1,
+    "ssim": -1, "psnr": -1, "mse": +1, "lpips": +1, "cpl": +1, "sss": +1,
+    "tsi": +1, "wd": +1, "kl": +1, "histi": -1,
     "clip_sim": -1, "cos_sim": -1,
     "baryshift": +1, "lid": 0, "overlap": +1, "indeg_delta": 0,
     "nmi": +1, "ari": +1,
@@ -224,8 +254,7 @@ TASK_METRIC_DIRECTION = {
     "a1": -1, "a2": -1, "a3": -1,
 }
 
-# det/seg degraded dirs are created on demand by gen_degradation.py; only the
-# shared output roots are pre-created here.
+
 for d in (EMB_ROOT, RESULTS, ANALYSIS_DIR, LOG_DIR,
           RESULTS / "perimage_metrics", RESULTS / "task_perf",
           RESULTS / "correlations", RESULTS / "figs", RESULTS / "logs"):
