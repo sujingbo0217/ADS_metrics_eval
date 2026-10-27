@@ -171,6 +171,7 @@ def main():
         metrics = run_condition(a.model, dg, sev, work_dir)
         row = flatten(metrics, a.model, dg, sev)
         rows.append(row)
+        pd.DataFrame(rows).to_parquet(out, index=False)
         print(f"[eval_det] {a.model} {dg}_{sev}: "
               f"3D_mod={row.get('ap3d_mod_r40', float('nan')):.4f} "
               f"BEV_mod={row.get('apbev_mod_r40', float('nan')):.4f}")

@@ -2,6 +2,7 @@ import pandas as pd
 
 import config as C
 
+CLIP = 0.999999
 COND = ["degradation", "severity"]
 IMAGE = ["degradation", "severity", "image_id"]
 GEOMETRY_COLS = [

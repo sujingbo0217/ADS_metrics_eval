@@ -136,6 +136,8 @@ def main():
                               severity=sev, miou=miou_g,
                               **{f"iou_{c}": float(v)
                                  for c, v in enumerate(iou_vec)}))
+        pd.DataFrame(per_rows).to_parquet(per_path, index=False)
+        pd.DataFrame(cond_rows).to_parquet(cond_path, index=False)
         print(f"seg {dg}_{sev}: mIoU={miou_g:.4f}")
 
     clean_miou = cond_rows[0]["miou"]

@@ -342,6 +342,15 @@ GPU_PIXEL = {"mse": mse}
 CPU_PIXEL = {"ssim": ssim, "tsi": tsi, "wd": wd, "kl": kl, "histi": histi}
 
 
+def to_u8(t: torch.Tensor) -> np.ndarray:
+    return (t * 255).round().to(torch.uint8).permute(1, 2, 0).cpu().numpy()
+
+
+def cpu_pixel(name: str, a: np.ndarray, b: np.ndarray) -> float:
+    a, b = (np.ascontiguousarray(x[..., ::-1]) for x in (a, b))
+    return CPU_PIXEL[name](a, b)
+
+
 def metric(name: str, img1: torch.Tensor, img2: torch.Tensor, net=None):
     """Evaluate a PAIRED metric on a batch of image pairs.
 
@@ -351,16 +360,6 @@ def metric(name: str, img1: torch.Tensor, img2: torch.Tensor, net=None):
 
     Returns a length-N numpy array of per-image values.
     """
-    def to_u8(t: torch.Tensor) -> np.ndarray:
-        """[3, H, W] float in [0, 1] -> HWC uint8 (lossless for x / 255 input)."""
-        return (t * 255).round().to(torch.uint8).permute(1, 2, 0).cpu().numpy()
-    
-    def cpu_pixel(name: str, a: np.ndarray, b: np.ndarray) -> float:
-        """One CPU pixel metric on uint8 RGB HWC images, converted to the BGR
-        order cv2.imread gives L&S's code."""
-        a, b = (np.ascontiguousarray(x[..., ::-1]) for x in (a, b))
-        return CPU_PIXEL[name](a, b)
-    
     if name in NET_METRICS:
         return NET_METRICS[name](img1, img2, net).cpu().numpy()
     if name in GPU_PIXEL:
@@ -368,5 +367,4 @@ def metric(name: str, img1: torch.Tensor, img2: torch.Tensor, net=None):
     if name in CPU_PIXEL:
         return np.array([cpu_pixel(name, to_u8(img1[i]), to_u8(img2[i]))
                          for i in range(len(img1))])
-    
     raise ValueError(name)

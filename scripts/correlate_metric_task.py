@@ -28,8 +28,6 @@ from scipy import stats
 import config as C
 import data_utils as D
 
-CLIP = 0.999999
-
 
 # ---------------------------------------------------------------------------
 # distribution level
@@ -45,7 +43,7 @@ def run_distribution():
             rows.append(dict(dataset=spec["dataset"], task=spec["task"], model=model,
                              metric=name, n=len(j), rho=r, p=p))
     df = pd.DataFrame(rows)
-    out = C.ANALYSIS_DIR / "exp_distribution.csv"
+    out = C.ANALYSIS_DIR / "results_distribution.csv"
     df.to_csv(out, index=False)
 
     print("=" * 78)
@@ -66,7 +64,7 @@ def grid(s, ids):
 
 
 def fisher(r):
-    return np.tanh(np.nanmean(np.arctanh(np.clip(r, -CLIP, CLIP)), axis=0))
+    return np.tanh(np.nanmean(np.arctanh(np.clip(r, -D.CLIP, D.CLIP)), axis=0))
 
 
 def image_model(model, met, metrics=C.IMAGE_METRICS):
@@ -92,7 +90,7 @@ def image_model(model, met, metrics=C.IMAGE_METRICS):
     for m in metrics:
         ds = list(point[m])
         r_d = np.array([point[m][d] for d in ds])
-        z = np.arctanh(np.clip(r_d, -CLIP, CLIP))
+        z = np.arctanh(np.clip(r_d, -D.CLIP, D.CLIP))
         rows.append(dict(dataset=spec["dataset"], task=spec["task"], model=model,
                          metric=m, n_images=n, n_types=len(ds), rho=fisher(r_d),
                          z_sd=z.std(ddof=1), n_pos=int((r_d > 0).sum()),
@@ -114,7 +112,7 @@ def run_image():
             rows_d += rd
             print(f"  {model:12s} {dataset:12s} done ({time.time() - t0:.0f}s)", flush=True)
     df = pd.DataFrame(rows)
-    out, out_d = C.ANALYSIS_DIR / "exp_image.csv", C.ANALYSIS_DIR / "exp_image_by_degradation.csv"
+    out, out_d = C.ANALYSIS_DIR / "results_image.csv", C.ANALYSIS_DIR / "results_image_by_degradation.csv"
     df.to_csv(out, index=False)
     pd.DataFrame(rows_d).to_csv(out_d, index=False)
 
