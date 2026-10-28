@@ -1,4 +1,5 @@
 #include "knn.h"
+#include "geometry.h"
 
 #include <cuda_runtime.h>
 
@@ -37,13 +38,6 @@ static float* upload(const std::vector<float>& h) {
   return d;
 }
 
-static int* upload(const std::vector<int>& h) {
-  int* d = nullptr;
-  CUDA_CHECK(cudaMalloc(&d, h.size() * sizeof(int)));
-  CUDA_CHECK(cudaMemcpy(d, h.data(), h.size() * sizeof(int),
-                        cudaMemcpyHostToDevice));
-  return d;
-}
 
 static std::vector<float> rand_vec(int n, unsigned seed) {
   std::srand(seed);
@@ -122,6 +116,10 @@ static void verify_topk(const knnResult& res, const std::vector<float>& D,
     for (int j = 0; j < k; j++) {
       float gd = gpu_dist[q * k + j];
       float cd = cpu_dist[q * k + j];
+      if (!approx_eq(gd, cd, atol, 1e-3f)) {
+        fprintf(stderr, "  row %d rank %d: gpu %.6f (idx %d) vs cpu %.6f (idx %d)\n", q,
+                j, gd, gpu_idx[q * k + j], cd, cpu_idx[q * k + j]);
+      }
       assert(approx_eq(gd, cd, atol, 1e-3f) &&
              "top-k distance rank mismatch with CPU reference");
 
@@ -132,7 +130,6 @@ static void verify_topk(const knnResult& res, const std::vector<float>& D,
              "returned index does not correspond to returned distance");
     }
   }
-  (void)cpu_idx;
 }
 
 // ─── Tests ─────────────────────────────────────────────────────────────
@@ -221,12 +218,12 @@ void test_cross_set_knn_mahalanobis_identity() {
   printf("test_cross_set_knn_mahalanobis_identity PASSED\n");
 }
 
-void test_pooled_knn_excludes_self() {
+void test_mixed_knn_excludes_self() {
   const int n = 15, dim = 4, k = 3;
   auto hX = rand_vec(n * dim, 33);
   float* dX = upload(hX);
 
-  knnResult res = pooled_knn(dX, n, dim, k, DistanceType::L2);
+  knnResult res = mixed_knn(dX, n, dim, k, DistanceType::L2);
 
   auto D = cpu_l2_dist_matrix(hX, hX, n, n, dim);
   std::vector<int> ci;
@@ -242,13 +239,13 @@ void test_pooled_knn_excludes_self() {
                         cudaMemcpyDeviceToHost));
   for (int i = 0; i < n; i++) {
     for (int j = 0; j < k; j++) {
-      assert(gpu_idx[i * k + j] != i && "pooled_knn must exclude self");
+      assert(gpu_idx[i * k + j] != i && "mixed_knn must exclude self");
     }
   }
 
   free_knn_result(res);
   cudaFree(dX);
-  printf("test_pooled_knn_excludes_self PASSED\n");
+  printf("test_mixed_knn_excludes_self PASSED\n");
 }
 
 void test_free_knn_result_nullifies() {
@@ -262,114 +259,40 @@ void test_free_knn_result_nullifies() {
   printf("test_free_knn_result_nullifies PASSED\n");
 }
 
-// ─── Graph property functions ───
-
-void test_barycenter_shift() {
-  // 3 queries, 4 base points, dim=2, k=2
-  const int n_q = 3, dim = 2, k = 2;
-  std::vector<float> hB = {
-      0.0f, 0.0f,
-      2.0f, 0.0f,
-      0.0f, 2.0f,
-      2.0f, 2.0f,
-  };
-  std::vector<float> hQ = {
-      1.0f, 1.0f,   // centroid of any 2 of B; shift depends on neighbors
-      0.0f, 0.0f,
-      3.0f, 3.0f,
-  };
-  // Pick neighbors deterministically for each query.
-  std::vector<int> hN = {
-      0, 3,   // centroid = (1,1); shift from (1,1) = 0
-      0, 1,   // centroid = (1,0); shift from (0,0) = 1
-      2, 3,   // centroid = (1,2); shift from (3,3) = sqrt(4+1)
-  };
-
-  float* dB = upload(hB);
-  float* dQ = upload(hQ);
-  int* dN = upload(hN);
-  float* dOut = nullptr;
-  CUDA_CHECK(cudaMalloc(&dOut, n_q * sizeof(float)));
-
-  barycenter_shift(dB, dQ, dN, n_q, k, dim, dOut);
-
-  std::vector<float> hOut(n_q);
-  CUDA_CHECK(cudaMemcpy(hOut.data(), dOut, n_q * sizeof(float),
-                        cudaMemcpyDeviceToHost));
-
-  assert(approx_eq(hOut[0], 0.0f));
-  assert(approx_eq(hOut[1], 1.0f));
-  assert(approx_eq(hOut[2], std::sqrt(5.0f)));
-
-  cudaFree(dB);
-  cudaFree(dQ);
-  cudaFree(dN);
-  cudaFree(dOut);
-  printf("test_barycenter_shift PASSED\n");
-}
-
-void test_neighbor_overlap() {
-  const int n_b = 3, k = 3;
-  std::vector<int> real = {
-      1, 2, 3,
-      0, 4, 5,
-      7, 8, 9,
-  };
-  std::vector<int> pooled = {
-      1, 2, 9,   // overlap {1,2} -> 2/3
-      0, 4, 5,   // overlap {0,4,5} -> 3/3
-      0, 1, 2,   // overlap {} -> 0/3
-  };
-  int* dR = upload(real);
-  int* dP = upload(pooled);
-  float* dOut = nullptr;
-  CUDA_CHECK(cudaMalloc(&dOut, n_b * sizeof(float)));
-
-  neighbor_overlap(dR, dP, n_b, k, dOut);
-
-  std::vector<float> hOut(n_b);
-  CUDA_CHECK(cudaMemcpy(hOut.data(), dOut, n_b * sizeof(float),
-                        cudaMemcpyDeviceToHost));
-
-  assert(approx_eq(hOut[0], 2.0f / 3.0f));
-  assert(approx_eq(hOut[1], 1.0f));
-  assert(approx_eq(hOut[2], 0.0f));
-
-  cudaFree(dR);
-  cudaFree(dP);
-  cudaFree(dOut);
-  printf("test_neighbor_overlap PASSED\n");
-}
-
 void test_compute_lid() {
-  // Hand-computed LID: formula LID = -k / Σ_{i=0..k-2} ln(d_i / d_{k-1})
-  // (Matches the kernel, which iterates i in [0, k-1).)
+  // Levina-Bickel with MacKay & Ghahramani's bias correction, which is what the
+  // kernel implements:  LID = -(k-2) / Σ_{i=0..k-2} ln(d_i / d_{k-1}).
+  // The numerator is k-2, not k: this test asserted -k before the kernel was
+  // corrected, and would have gone on asserting an 11%-inflated estimate at
+  // k = 10.
   const int n_q = 2, k = 4;
+  const int ld = 6;   // wider than k: P3 searches three neighbors for TwoNN
+                      // whatever k is, and reads the first k of that row.
   std::vector<float> hD = {
       // row 0: all equal distances -> sum_log = 0 -> branch outputs 0
-      0.5f, 0.5f, 0.5f, 0.5f,
+      0.5f, 0.5f, 0.5f, 0.5f, 0.6f, 0.7f,
       // row 1: varying
-      0.1f, 0.2f, 0.3f, 0.4f,
+      0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f,
   };
   float* dD = upload(hD);
   float* dOut = nullptr;
   CUDA_CHECK(cudaMalloc(&dOut, n_q * sizeof(float)));
 
-  compute_lid(dD, n_q, k, dOut);
+  compute_lid(dD, n_q, k, ld, dOut);
   std::vector<float> hOut(n_q);
   CUDA_CHECK(cudaMemcpy(hOut.data(), dOut, n_q * sizeof(float),
                         cudaMemcpyDeviceToHost));
 
-  // Row 0: sum_log = 0, which is NOT < eps (1e-6). Kernel sets output = 0.
+  // Row 0: all k neighbors equidistant, LID undefined. Kernel outputs 0.
   assert(approx_eq(hOut[0], 0.0f));
 
-  // Row 1: reference computation matching the kernel's loop range [0, k-1).
-  float dk = 0.4f;
+  // Row 1: the columns beyond k must not have been read.
+  float dk = hD[1 * ld + (k - 1)];
   float sum_log = 0.0f;
   for (int i = 0; i < k - 1; i++) {
-    sum_log += std::log(hD[1 * k + i] / dk);
+    sum_log += std::log(hD[1 * ld + i] / dk);
   }
-  float expected = (sum_log < 1e-6f) ? (-(float)k / sum_log) : 0.0f;
+  float expected = -(float)(k - 2) / sum_log;
   assert(approx_eq(hOut[1], expected, 1e-3f, 1e-3f));
 
   cudaFree(dD);
@@ -377,113 +300,20 @@ void test_compute_lid() {
   printf("test_compute_lid PASSED\n");
 }
 
-void test_compute_indegree() {
-  const int n = 5, k = 2;
-  std::vector<int> hN = {
-      1, 2,
-      0, 2,
-      3, 4,
-      0, 1,
-      2, 0,
-  };
-  // In-degree: count of occurrences in neighbor table.
-  // 0: rows 1,3,4 -> 3
-  // 1: rows 0,3   -> 2
-  // 2: rows 0,1,4 -> 3
-  // 3: row 2      -> 1
-  // 4: row 2      -> 1
-  int* dN = upload(hN);
-  int* dOut = nullptr;
-  CUDA_CHECK(cudaMalloc(&dOut, n * sizeof(int)));
-
-  compute_indegree(dN, n, k, dOut);
-
-  std::vector<int> hOut(n);
-  CUDA_CHECK(cudaMemcpy(hOut.data(), dOut, n * sizeof(int),
-                        cudaMemcpyDeviceToHost));
-
-  std::vector<int> expected = {3, 2, 3, 1, 1};
-  for (int i = 0; i < n; i++) {
-    assert(hOut[i] == expected[i]);
-  }
-
-  cudaFree(dN);
-  cudaFree(dOut);
-  printf("test_compute_indegree PASSED\n");
-}
-
-void test_build_mutual_knn() {
-  // n = 4, k = 2
-  // Edges in k-NN (directed):
-  //   0 -> {1, 2}
-  //   1 -> {0, 2}
-  //   2 -> {1, 3}
-  //   3 -> {2, 0}
-  // Mutual pairs (both directions):
-  //   (0,1), (1,0)
-  //   (1,2), (2,1)
-  //   (2,3), (3,2)
-  //   NOT (0,2) because 2 does not list 0, (0,3) not in 0's list, etc.
-  const int n = 4, k = 2;
-  std::vector<int> hN = {
-      1, 2,
-      0, 2,
-      1, 3,
-      2, 0,
-  };
-  int* dN = upload(hN);
-
-  CSRGraph g = build_mutual_knn(dN, n, k);
-  assert(g.n == n);
-
-  std::vector<int> row_ptr(n + 1);
-  CUDA_CHECK(cudaMemcpy(row_ptr.data(), g.row_ptr, (n + 1) * sizeof(int),
-                        cudaMemcpyDeviceToHost));
-  std::vector<int> col_idx(g.nnz);
-  if (g.nnz > 0) {
-    CUDA_CHECK(cudaMemcpy(col_idx.data(), g.col_idx, g.nnz * sizeof(int),
-                          cudaMemcpyDeviceToHost));
-  }
-
-  // Expected adjacency as sorted per-row sets.
-  std::vector<std::vector<int>> expected = {
-      {1},     // 0 <-> 1 only
-      {0, 2},  // 1 <-> 0, 1 <-> 2
-      {1, 3},  // 2 <-> 1, 2 <-> 3
-      {2},     // 3 <-> 2
-  };
-  int expected_nnz = 0;
-  for (auto& r : expected) expected_nnz += (int)r.size();
-  assert(g.nnz == expected_nnz);
-
-  assert(row_ptr[0] == 0);
-  assert(row_ptr[n] == g.nnz);
-
-  for (int u = 0; u < n; u++) {
-    int lo = row_ptr[u], hi = row_ptr[u + 1];
-    std::vector<int> row(col_idx.begin() + lo, col_idx.begin() + hi);
-    std::sort(row.begin(), row.end());
-    assert(row == expected[u] && "mutual knn row mismatch");
-  }
-
-  free_csr_graph(g);
-  assert(g.row_ptr == nullptr && g.col_idx == nullptr);
-  cudaFree(dN);
-  printf("test_build_mutual_knn PASSED\n");
-}
-
+// Tests for barycenter_shift, neighbor_overlap, compute_indegree and
+// build_mutual_knn were here. The first three cover the previous
+// five-property design and are now commented out at the end of src/graph.cu;
+// build_mutual_knn went with mutual_graph.cu. Nothing calls any of them.
+// Superseded tests are removed rather than skipped so a green run means every
+// kernel that ships is covered.
 int main() {
   test_cross_set_knn_l2();
   test_cross_set_knn_inner_product();
   test_cross_set_knn_mahalanobis_identity();
-  test_pooled_knn_excludes_self();
+  test_mixed_knn_excludes_self();
   test_free_knn_result_nullifies();
 
-  test_barycenter_shift();
-  test_neighbor_overlap();
   test_compute_lid();
-  test_compute_indegree();
-  test_build_mutual_knn();
 
   printf("\nAll tests passed.\n");
   return 0;

@@ -66,14 +66,14 @@ def _maybe_normalize(emb: np.ndarray, space: str) -> np.ndarray:
     return np.ascontiguousarray(emb, dtype=np.float32)
 
 
-def _build_mutual_knn_graph(pooled_idx: np.ndarray) -> nx.Graph:
+def _build_mutual_knn_graph(mixed_idx: np.ndarray) -> nx.Graph:
     """Build an undirected mutual k-NN graph from pooled k-NN indices.
 
     An edge (i, j) exists iff j ∈ kNN(i) AND i ∈ kNN(j).
     Uses set-based lookup for O(N·k) total time.
     """
-    n, k = pooled_idx.shape
-    neighbor_sets = [set(pooled_idx[i]) - {i} for i in range(n)]
+    n, k = mixed_idx.shape
+    neighbor_sets = [set(mixed_idx[i]) - {i} for i in range(n)]
 
     G = nx.Graph()
     G.add_nodes_from(range(n))
@@ -86,13 +86,13 @@ def _build_mutual_knn_graph(pooled_idx: np.ndarray) -> nx.Graph:
 
 
 def _community_analysis(
-    pooled_idx: np.ndarray,
+    mixed_idx: np.ndarray,
     n_real: int,
     n_total: int,
 ) -> dict:
     """Run Louvain community detection on the mutual k-NN graph and compute
     NMI / ARI against the ground-truth real/fake labels."""
-    G = _build_mutual_knn_graph(pooled_idx)
+    G = _build_mutual_knn_graph(mixed_idx)
 
     partition = community_louvain.best_partition(G, random_state=42)
     pred_labels = np.array([partition.get(i, -1) for i in range(n_total)])
@@ -151,10 +151,10 @@ def run_single(
     # ── 2. Pooled k-NN: R ∪ Q ──
     # rows [0, N_r) = real, [N_r, N_p) = syn
     emb_pooled = np.vstack([emb_real, emb_syn])
-    pooled_idx, pooled_dist = knn_ext.pooled_knn(
+    mixed_idx, mixed_dist = knn_ext.mixed_knn(
         np.ascontiguousarray(emb_pooled, dtype=np.float32), k, dist_type
     )
-    # pooled_idx: (N_p, k)  indices into emb_pooled
+    # mixed_idx: (N_p, k)  indices into emb_pooled
 
     # ── 3. Geometric properties ──
 
@@ -173,18 +173,18 @@ def run_single(
     # 3c. Neighborhood Overlap (pooled vs real-only)
     #     For each real point: fraction of its real-only k-NN that survive
     #     in the pooled k-NN (where synthetic points may displace real ones).
-    overlap = knn_ext.neighbor_overlap(real_only_idx, pooled_idx, k)
+    overlap = knn_ext.neighbor_overlap(real_only_idx, mixed_idx, k)
     # overlap: (N_r,)
 
     # 3d. In-degree (pooled graph)
     #     How many times each point is chosen as a neighbor.
-    indegree = knn_ext.compute_indegree(pooled_idx, k)
+    indegree = knn_ext.compute_indegree(mixed_idx, k)
     # indegree: (N_p,)  int array
     indeg_real = indegree[:N_r].astype(np.float64)
     indeg_syn = indegree[N_r:].astype(np.float64)
 
     # 3e. Community structure (mutual k-NN → Louvain)
-    community = _community_analysis(pooled_idx, N_r, N_p)
+    community = _community_analysis(mixed_idx, N_r, N_p)
 
     # ── 4. Aggregate statistics ──
     result = {
@@ -230,7 +230,7 @@ def run_degradation_sweep(
     # Precompute real-only k-NN (used for overlap at every level)
     print(f"    real-only k-NN (N={N_r}, k={k}) ...", end=" ", flush=True)
     t0 = time.time()
-    real_only_idx, _ = knn_ext.pooled_knn(emb_real, k, dist_type)
+    real_only_idx, _ = knn_ext.mixed_knn(emb_real, k, dist_type)
     print(f"{time.time() - t0:.3f}s")
 
     results: Dict[str, dict] = {}
