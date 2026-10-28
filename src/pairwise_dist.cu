@@ -1,9 +1,18 @@
 #include "knn.h"
+#include "cuda_check.h"
+#include "device_buffer.h"
 #include "utils.h"
 
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
-// #include <cmath>
+#include <cstdlib>
+
+// Created on first use and kept. See the note in device_buffer.h.
+cublasHandle_t knn_cublas_handle() {
+  static cublasHandle_t h = nullptr;
+  if (!h) CUBLAS_CHECK(cublasCreate(&h));
+  return h;
+}
 
 // ─── Precompute squared norms ───
 __global__ void compute_norms_kernel(const float* X, float* norms, int n, int dim) {
@@ -42,13 +51,19 @@ void pairwise_l2_dist(
   cudaMalloc(&norms_b, n_b * sizeof(float));
   cudaMalloc(&norms_q, n_q * sizeof(float));
   int block_size = 256;
-  int grid_size = (n_b + block_size - 1) / block_size;
-  compute_norms_kernel<<<grid_size, block_size>>>(base, norms_b, n_b, dim);
-  compute_norms_kernel<<<grid_size, block_size>>>(query, norms_q, n_q, dim);
+  // Each launch must be sized from ITS OWN row count. Both used (n_b + ...)
+  // before, which silently under-covered the query side whenever n_q > n_b --
+  // harmless for mixed_knn where n_q == n_b, wrong for cross_set_knn.
+  compute_norms_kernel<<<(n_b + block_size - 1) / block_size, block_size>>>(
+      base, norms_b, n_b, dim);
+  CUDA_CHECK_KERNEL();
+  compute_norms_kernel<<<(n_q + block_size - 1) / block_size, block_size>>>(
+      query, norms_q, n_q, dim);
+  CUDA_CHECK_KERNEL();
 
   // GEMM -> dist
   float alpha = -2.0f, beta = 0.0f;
-  cublasSgemm(
+  CUBLAS_CHECK(cublasSgemm(
     handle, CUBLAS_OP_T, CUBLAS_OP_N, // B^T, Q
     n_b, n_q, dim,                     // m, n, k
     &alpha,
@@ -56,15 +71,16 @@ void pairwise_l2_dist(
     query, dim,                       // ldb = dim
     &beta,
     dist, n_b                         // ldc = n_b
-  );
+  ));
 
   // fuse norms
   dim3 block2(16, 16);
   dim3 grid2((n_b + 15) / 16, (n_q + 15) / 16);
   fuse_l2_kernel<<<grid2, block2>>>(dist, norms_b, norms_q, n_b, n_q);
+  CUDA_CHECK_KERNEL();
 
-  cudaFree(norms_b);
-  cudaFree(norms_q);
+  CUDA_CHECK(cudaFree(norms_b));
+  CUDA_CHECK(cudaFree(norms_q));
 }
 
 // ─── Inner-product distance (cosine after normalization) ───
@@ -74,7 +90,8 @@ void pairwise_ip_dist(
   int n_b, int n_q, int dim, float* dist
 ) {
   float alpha = -1.0f, beta = 0.0f;
-  cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, n_b, n_q, dim, &alpha, base, dim, query, dim, &beta, dist, n_b);
+  CUBLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, n_b, n_q, dim, &alpha,
+                           base, dim, query, dim, &beta, dist, n_b));
 }
 
 // ─── Row-wise L2 normalization (in-place) ───
@@ -96,6 +113,7 @@ void l2_normalize_rows(float* X, int n, int dim) {
   int block_size = 64;
   int grid_size = (n + block_size - 1) / block_size;
   l2_normalize_rows_kernel<<<grid_size, block_size>>>(X, n, dim);
+  CUDA_CHECK_KERNEL();
 }
 
 __global__ void pairwise_mahalanobis_kernel(const float* base, const float* query, const float* inv_cov, float* dist, int n_b, int n_q, int dim) {
@@ -115,4 +133,25 @@ __global__ void pairwise_mahalanobis_kernel(const float* base, const float* quer
     res += diff_d1 * inner;
   }
   dist[qi * n_b + bi] = res;
+}
+
+// Full pairwise distance matrix
+// Output: dist (n_q, n_b), row-major, device memory. L2 returns SQUARED
+// Euclidean and InnerProduct returns NEGATIVE dot product, matching
+// cross_set_knn and mixed_knn. Both are monotone in true distance, so ranks
+// are unaffected; true_distance_kernel converts where a magnitude is needed.
+void pairwise_distances(
+  const float* base, const float* query, int n_b, int n_q, int dim,
+  DistanceType dist_type, float* dist
+) {
+  cublasHandle_t handle = knn_cublas_handle();
+  if (dist_type == DistanceType::L2) {
+    pairwise_l2_dist(handle, base, query, n_b, n_q, dim, dist);
+  } else if (dist_type == DistanceType::InnerProduct) {
+    pairwise_ip_dist(handle, base, query, n_b, n_q, dim, dist);
+  } else {
+    std::fprintf(stderr, "[knn_ext] pairwise_distances: Mahalanobis needs inv_cov, "
+                         "use cross_set_knn or mixed_knn\n");
+    abort();
+  }
 }

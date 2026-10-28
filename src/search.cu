@@ -35,7 +35,7 @@ __global__ void topk_search_kernel(
     if (d < max_d) {
       nbhs[max_pos] = i;
       out_dist[max_pos] = d;
-      max_d = -1.0f;
+      max_d = -inf;
       for (int j = 0; j < k; j++) {
         if (out_dist[j] > max_d) {
           max_d = out_dist[j];
