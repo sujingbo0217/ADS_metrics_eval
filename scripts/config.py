@@ -1,6 +1,6 @@
 from pathlib import Path
 
-ROOT = Path("/scratch/jsu02/kitti")         # change on your machine
+ROOT = Path("/data2/kitti")         # change on your machine
 REPO_ROOT = Path(__file__).resolve().parent.parent / "repos"
 
 # detection/images/training/image_2, detection/labels/training/label_2, ImageSets/
@@ -10,14 +10,12 @@ KITTI_SEG = ROOT / "segmentation"
 KITTI_RAW = ROOT / "raw_data"              # raw drives for Eigen split
 MONODEPTH2_REPO = REPO_ROOT / "monodepth2"
 ROBODEPTH_REPO = REPO_ROOT / "RoboDepth"
-KITTI_EVAL_REPO = REPO_ROOT / "kitti-object-eval-python"
-MMDET3D_REPO = REPO_ROOT / "mmdetection3d"
 
 
 KITTI_STD_ROOT = KITTI_OBJ / "working"
 COND_ROOTS = ROOT / "cond_roots"
 
-CITYSCAPES = Path("/scratch/jsu02/cityscapes")      # leftImg8bit/ and gtFine/ (change on your machine)
+CITYSCAPES = Path("/data2/cityscapes")      # leftImg8bit/ and gtFine/ (change on your machine)
 CITYSCAPES_SPLIT = "val"                            # official val 500
 
 # depth: pre-generated RoboDepth KITTI-C (downloaded): <degradation>/<severity>/
@@ -51,19 +49,6 @@ DEGRADATIONS = [
 ]
 SEVERITIES = [1, 2, 3, 4, 5]
 CLEAN = ("clean", 0)
-
-OLD_FAMILY_MAP = {
-    "gaussian_noise": "noise", "shot_noise": "noise", "impulse_noise": "noise",
-    "iso_noise": "noise",
-    "defocus_blur": "blur", "glass_blur": "blur", "motion_blur": "blur",
-    "zoom_blur": "blur",
-    "brightness": "brightness", "dark": "brightness",
-    "contrast": "contrast",
-    "color_quant": "colorjitter", "hue": "colorjitter",
-    "snow": "weather", "frost": "weather", "fog": "weather",
-    "elastic_transform": "digital", "pixelate": "digital",
-    "jpeg_compression": "digital",
-}
 
 
 def all_conditions():
@@ -108,6 +93,7 @@ IMAGE_METRICS = {
     "SSS": +1, "SSIM": -1, "MSE": +1, "TSI": +1, "WD": +1, "KL": +1,
     "HistI": -1,
 }
+CONTROL_METRICS = {"L2@VGG": +1}
 METRICS = {**DISTRIBUTION_METRICS, **IMAGE_METRICS}
 
 IMAGE_DATASETS = ["kitti_seg", "cityscapes", "kitti_depth"]
@@ -115,10 +101,6 @@ IMAGE_DATASETS = ["kitti_seg", "cityscapes", "kitti_depth"]
 
 def models_on(dataset):
     return [m for m, d in MODELS.items() if d["dataset"] == dataset]
-
-
-TASKS = ["det", "seg", "depth", "cityscapes"]
-METRIC_POOL_TASK = "det"
 
 
 def split_ids(task):
@@ -211,51 +193,9 @@ def cityscapes_gt_path(image_id, kind="labelTrainIds"):
 SPACES = ["inception_v3", "clip_vitb32", "resnet50", "vgg_lpips", 
             "alexnet_lpips", "pixel", "segformer", "dinov2_vitl14"]
 
-SPACE_OBJECTIVE = {
-    "inception_v3":  "imagenet-supervised",
-    "resnet50":      "imagenet-supervised",
-    "vgg_lpips":     "imagenet-supervised",   # backbone shared with LPIPS-vgg
-    "alexnet_lpips": "imagenet-supervised",   # backbone shared with LPIPS-alex
-    "clip_vitb32":   "image-text-contrastive",
-    "segformer":     "cityscapes-segmentation",
-    "dinov2_vitl14": "self-supervised",       # no labels anywhere in training
-    "pixel":         "none",                  # network-free control
-}
-
-K_LIST = [10, 20, 50]
-K_DEFAULT = 10
-EXCLUDE_SELF = True                       # leave-one-out per-point reference
 SEED = 2026
 # (H, W) downsample for pixel space
 PIXEL_SIZE = (64, 212)
 
-# -----------------------------------------------------------------------------
-# SIGN CONVENTIONS
-# Expected direction of each measure as degradation severity increases.
-# +1: increases with degradation; -1: decreases; 0: degradation-dependent sign
-# (use |x - clean_baseline| for correlation, discuss raw sign separately).
-# -----------------------------------------------------------------------------
-DIRECTION = {
-    "fid": +1, "kid": +1, "frechet": +1, "mmd": +1,
-    "ssim": -1, "psnr": -1, "mse": +1, "lpips": +1, "cpl": +1, "sss": +1,
-    "tsi": +1, "wd": +1, "kl": +1, "histi": -1,
-    "clip_sim": -1, "cos_sim": -1,
-    "baryshift": +1, "lid": 0, "overlap": +1, "indeg_delta": 0,
-    "nmi": +1, "ari": +1,
-}
-# Task columns converted to relative performance drop in correlate.py; direction of
-# the RAW column (before conversion): -1 = higher is better, +1 = error metric.
-TASK_METRIC_DIRECTION = {
-    "ap_mod_r40": -1, "ap_easy_r40": -1, "ap_hard_r40": -1,
-    "ap3d_mod_r40": -1, "apbev_mod_r40": -1,
-    "q": -1, "conf": -1, "miss": +1, "fp": +1,
-    "miou": -1, "pixacc": -1, "entropy": +1,
-    "abs_rel": +1, "sq_rel": +1, "rmse": +1, "rmse_log": +1, "silog": +1,
-    "a1": -1, "a2": -1, "a3": -1,
-}
-
-
-for d in (EMB_ROOT, RESULTS, ANALYSIS_DIR, LOG_DIR,
-          RESULTS / "perimage_metrics", RESULTS / "task_perf",
-          RESULTS / "correlations", RESULTS / "figs", RESULTS / "logs"):
+for d in (EMB_ROOT, RESULTS, ANALYSIS_DIR, LOG_DIR, RESULTS / "task_perf", RESULTS / "logs"):
     d.mkdir(parents=True, exist_ok=True)

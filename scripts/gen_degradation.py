@@ -76,49 +76,7 @@ if _rd_utils_path.exists() and _ic_degrade is not None:
         print("[gen_degradation] using RoboDepth extras: dark/color_quant/iso_noise")
     except Exception as e:  # pragma: no cover
         print(f"[gen_degradation] RoboDepth extras import failed ({e}); "
-              f"falling back to local re-implementations")
-
-
-# --- local fallbacks for RoboDepth extras ------------------------------------
-def _dark(x: np.ndarray, severity: int) -> np.ndarray:
-    """Low-light: gamma curve + intensity scale + Poisson shot noise."""
-    gamma = [1.5, 1.8, 2.2, 2.6, 3.0][severity - 1]
-    scale = [0.60, 0.50, 0.42, 0.34, 0.26][severity - 1]
-    x = (x / 255.0) ** gamma * scale
-    lam = np.clip(x * 255.0 * 0.8, 1e-6, None)
-    x = np.random.poisson(lam) / (255.0 * 0.8)
-    return np.clip(x * 255.0, 0, 255).astype(np.uint8)
-
-
-def _color_quant(x: np.ndarray, severity: int) -> np.ndarray:
-    bits = [6, 5, 4, 3, 2][severity - 1]
-    shift = 8 - bits
-    return ((x.astype(np.uint8) >> shift) << shift).astype(np.uint8)
-
-
-def _iso_noise(x: np.ndarray, severity: int) -> np.ndarray:
-    """Poisson-Gaussian sensor noise (ISO gain)."""
-    g_sigma = [0.03, 0.06, 0.10, 0.15, 0.20][severity - 1] * 255.0
-    p_scale = [60, 25, 12, 5, 3][severity - 1]
-    x = x.astype(np.float32)
-    x = np.random.poisson(np.clip(x, 0, 255) / 255.0 *
-                          p_scale) / p_scale * 255.0
-    x = x + np.random.normal(0.0, g_sigma, size=x.shape)
-    return np.clip(x, 0, 255).astype(np.uint8)
-
-
-def _hue(x: np.ndarray, severity: int) -> np.ndarray:
-    """Deterministic hue rotation (replaces the old paper's stochastic
-    ColorJitter hue). torchvision functional adjust_hue with fixed factor."""
-    import torch
-    import torchvision.transforms.functional as F
-    t = torch.from_numpy(np.ascontiguousarray(x).copy()).permute(2, 0, 1)
-    t = F.adjust_hue(t, C.HUE_FACTORS[severity - 1])
-    return t.permute(1, 2, 0).numpy().astype(np.uint8)
-
-
-_LOCAL = {"dark": _dark, "color_quant": _color_quant,
-          "iso_noise": _iso_noise, "hue": _hue}
+              f"dark, color_quant, and iso_noise will not work")
 
 
 def apply_degradation(img: np.ndarray, degradation: str, severity: int) -> np.ndarray:
@@ -130,10 +88,6 @@ def apply_degradation(img: np.ndarray, degradation: str, severity: int) -> np.nd
     # 2) the 15 standard degradations via imagecorruptions (RoboDepth uses this too)
     if degradation in _IC_AVAILABLE and _ic_degrade is not None:
         return _ic_degrade(img, corruption_name=degradation, severity=severity)
-    # 3) local fallbacks: deterministic `hue`, plus the 3 extras if (and only if)
-    #    the RoboDepth repo is unavailable.
-    # if degradation in _LOCAL:
-    #     return _LOCAL[degradation](img, severity)
     raise KeyError(f"no implementation for degradation '{degradation}'")
 
 

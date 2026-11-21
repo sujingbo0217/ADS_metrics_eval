@@ -6,11 +6,12 @@ CLIP = 0.999999
 COND = ["degradation", "severity"]
 IMAGE = ["degradation", "severity", "image_id"]
 GEOMETRY_COLS = [
-    "p1_dmu", "p1_dmu_cloud",
-    "p2_log_er_ratio", "p2_er_real", "p2_er_gen",
-    "p3_log_lid_ratio", "p3_lid_real", "p3_lid_gen",
-    "p4_trustworthiness", "p4_continuity",
-    "p5_rho", "p5_rho_real", "p5_rho_gen",
+    "construction",
+    "gp1_e", "gp2_rho", "gp2_delta", "gp3_h", "gp3_kappa", "gp4_tau",
+    "gp5_m", "gp5_chi", "gp6_T", "gp6_C", "gp6_b", "gp7_o",
+    "gp3_h_sel", "gp4_tau_sel", "gp5_m_sel", "gp6_T_sel", "gp6_C_sel", "gp6_b_sel",
+    "gp1_er_real", "gp1_er_gen", "gp2_id_real", "gp2_id_gen",
+    "gp5_m_real", "gp5_m_gen", "gp7_nu", "gp7_nu0", "gp7_d_t",
 ]
 
 DISTRIBUTION_METRICS_CSV = C.ANALYSIS_DIR / "distribution_metrics.csv"
@@ -29,6 +30,7 @@ def image_geometry_path(dataset):
 # metrics
 # ---------------------------------------------------------------------------
 def distribution_metrics(dataset):
+    """The four set metrics of extract_metrics.py."""
     d = pd.read_csv(DISTRIBUTION_METRICS_CSV)
     d = d[(d.dataset == dataset) & (d.degradation != "clean")]
     return d.drop(columns="dataset").set_index(COND)
@@ -42,9 +44,11 @@ def image_metrics(dataset):
 def condition_metrics(dataset):
     """Every metric available for dataset at condition level, in C.METRICS order.
 
-    kitti_det has no image-level metrics, so only its distribution-level columns."""
+    Image-level metrics only on C.IMAGE_DATASETS, whose tasks score every image;
+    detection (kitti_det) has condition-level scores only, so it gets only the
+    distribution-level columns, even where an image-level file exists."""
     d = distribution_metrics(dataset)
-    if image_metrics_path(dataset).exists():
+    if dataset in C.IMAGE_DATASETS:
         d = d.join(image_metrics(dataset).groupby(level=COND).mean(), how="inner")
     return d[[m for m in C.METRICS if m in d.columns]]
 
@@ -108,6 +112,10 @@ def write_geometry(dataset, rows):
     new = new[["dataset", *COND, "space", "k", *GEOMETRY_COLS]]
     if GEOMETRY_CSV.exists():
         old = pd.read_csv(GEOMETRY_CSV)
+        if list(old.columns) != list(new.columns):
+            print(f"  {GEOMETRY_CSV.name}: dropping {old.dataset.nunique()} "
+                  "dataset(s) written with the previous columns")
+            old = old.iloc[0:0]
         new = pd.concat([old[old.dataset != dataset], new], ignore_index=True)
     order = {c: i for i, c in enumerate(C.all_conditions())}
     new = (new.assign(_d=new.dataset.map({d: i for i, d in enumerate(C.DATASETS)}),

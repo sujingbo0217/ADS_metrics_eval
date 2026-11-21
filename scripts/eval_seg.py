@@ -29,10 +29,6 @@ for lid, tid in {7: 0, 8: 1, 11: 2, 12: 3, 13: 4, 17: 5, 19: 6, 20: 7, 21: 8,
                  32: 17, 33: 18}.items():
     LABEL2TRAIN[lid] = tid
 
-# Clean-mIoU sanity anchors from the mmseg model-zoo READMEs (guidebook 3.2e).
-CLEAN_ANCHOR = {"deeplabv3plus_r101": 0.805, "mask2former_swinl": 0.832}
-
-
 def confusion(gt, pred):
     m = gt != 255
     idx = gt[m].astype(np.int64) * N_CLS + pred[m].astype(np.int64)
