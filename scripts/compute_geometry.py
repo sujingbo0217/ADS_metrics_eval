@@ -1,28 +1,4 @@
-"""Five geometric properties over the full 90-condition grid.
-
-Produces tables shaped exactly like the metric tables, so that everything
-downstream reuses unchanged code:
-
-    ANALYSIS_DIR/geometry.csv
-        one row per (dataset, degradation, severity, space, k), the 13
-        property columns of data_utils.GEOMETRY_COLS. A geometric property at
-        a fixed (space, k) is therefore a drop-in replacement for a
-        condition-level metric column, and correlate_geometry.py exploits
-        that. Read one dataset back with data_utils.geometry(dataset).
-
-    ANALYSIS_DIR/image_geometry_<dataset>.parquet
-        one row per (degradation, severity, image_id, space, k):
-            lid_real, lid_gen      P3, per-point LID of each copy
-            trust, cont            P4, the per-point penalties T and C average
-            mix_real, mix_gen      P5, that image's own cross-set neighbor share
-        This is the tier-2 input, mirroring image_metrics_<dataset>.parquet.
-
-        THREE of the five properties have a per-image form, not five. P1 is a
-        centroid displacement and P2 a spectral entropy: both are properties of
-        a SET, and no single image has a share of them -- exactly as FID and KID
-        have no per-image value on the metric side. The scope structure of the
-        geometry therefore mirrors the scope structure of the metrics, which is
-        what lets tier 2 treat the two alike.
+"""Compute geometric properties
 
 Usage:
     python compute_geometry.py --dataset all
@@ -38,43 +14,13 @@ import pandas as pd
 
 import config as C
 import data_utils as D
-from geometry_lib import all_properties, prepare, set_stats
+from geometry_lib import (POINT_COLS, POINT_SELECTED, clean_reference,
+                          condition_properties, neighborhood_quality, prepare,
+                          select_construction)
 
-# Spaces that exist as cached .npy today. The LPIPS-coordinate and SSIM spaces
-# need a new extractor and are deliberately absent -- see
-# reports/geometry_rebuild.html for the open decisions.
-#
-# dinov2_vitl14 joined on 2026-09-28, after Sec. 5.4d added FD/KD in that space.
-# It is the only self-supervised phi in the pool, so it is the one place where
-# "is this geometry a property of the images or of ImageNet supervision" can be
-# asked directly.
-#
-# pixel joined on 2026-10-05 so that SSIM and MSE, which have no learned phi,
-# can be compared with geometry in their own space.
-#
-# All five are cached by extract_metrics.py --level distribution.
 SPACES = ["inception_v3", "clip_vitb32", "vgg_lpips", "dinov2_vitl14", "pixel"]
 KS = [5, 10, 20, 50, 100]
-# Per-image geometry is written only where a per-image TASK score exists to
-# correlate it against -- C.IMAGE_DATASETS, for the same reason as the image
-# metrics: AP is an integral over a dataset-wide PR curve and has no per-image
-# form, so kitti_det per-image geometry would have nothing to pair with.
-# Per-image rows are written at EVERY k, not just one.
-#
-# P5's per-image value is the count of cross-set neighbours over k, so it can
-# only take k+1 values. At k = 10 that is 11 levels, and in one Cityscapes
-# condition 500 images land on 9 distinct values with 41% of them sharing one --
-# too coarse to regress against. Widening k is the only way to give it
-# resolution, and since the same sweep also hands tier 2 a k ablation for P3 and
-# P4 at no extra compute, all of them are kept.
-#
-# Cost is storage, not time: the per-point arrays are produced by the kernels
-# regardless, so this only writes down what was already computed. Rows go from
-# 377k to 1.9M across the three pools.
-# The six per-point arrays, and the column each becomes.
-PT_COLS = {"p3_lid_pt_real": "lid_real", "p3_lid_pt_gen": "lid_gen",
-           "p4_trust_pt": "trust", "p4_cont_pt": "cont",
-           "p5_mix_pt_real": "mix_real", "p5_mix_pt_gen": "mix_gen"}
+SELECTION_CSV = C.ANALYSIS_DIR / "geometry_selection.csv"
 
 
 def _load(dataset, tag, space):
@@ -84,14 +30,40 @@ def _load(dataset, tag, space):
     return np.load(p).astype(np.float32)
 
 
-def run_dataset(dataset, spaces, ks, perimage, limit=0):
+def _clean_task_scores(dataset, ids):
+    out = {}
+    for model in C.models_on(dataset):
+        if C.MODELS[model]["task"] == "detection":
+            continue
+        try:
+            t = D.task_score(model, "perimage", clean=True)
+        except FileNotFoundError:
+            continue
+        t = t.xs(C.CLEAN, level=["degradation", "severity"])
+        out[model] = t.reindex(ids).to_numpy(dtype=np.float64)
+    return out
+
+
+def _write_selection(dataset, frames):
+    new = pd.concat(frames, ignore_index=True).assign(dataset=dataset)
+    if SELECTION_CSV.exists():
+        old = pd.read_csv(SELECTION_CSV)
+        # replace only the spaces just computed, so a run on new spaces keeps the others
+        stale = (old.dataset == dataset) & old.space.isin(new.space.unique())
+        new = pd.concat([old[~stale], new], ignore_index=True)
+    first = ["dataset", "space", "candidate", "k"]
+    new[first + [c for c in new.columns if c not in first]].to_csv(SELECTION_CSV, index=False)
+
+
+def run_dataset(dataset, spaces, ks, perimage, select, limit=0):
     perimage = perimage and dataset in C.IMAGE_DATASETS
     save = not limit
-    rows, pt_rows = [], []
+    rows, pt_rows, sel_frames = [], [], []
     ids = C.split_ids(C.DATASETS[dataset])
     conditions = [c for c in C.all_conditions() if c[0] != "clean"]
     if limit:
         conditions = conditions[:limit]
+    task_scores = _clean_task_scores(dataset, ids) if select else {}
 
     t0 = time.time()
     for space in spaces:
@@ -99,33 +71,43 @@ def run_dataset(dataset, spaces, ks, perimage, limit=0):
         if R is None:
             print(f"  [{dataset}/{space}] no clean embedding, skipping", flush=True)
             continue
-        print(f"  [{dataset}/{space}] R = {R.shape}", flush=True)
-        # P1 and P2 are per-SET quantities: the clean set's do not depend on the
-        # condition or on k, and the condition's do not depend on k. Hoisting
-        # them out of the two loops is the one piece of sharing the (R, G, k)
-        # API cannot do for itself.
         R = prepare(R, space)
-        sR = set_stats(R)
+        print(f"  [{dataset}/{space}] R = {R.shape}", flush=True)
+
+        # The construction is chosen on the clean set alone, once per dataset
+        # and representation, and frozen for all conditions.
+        selected = "primary"
+        if select:
+            chosen, q = select_construction(neighborhood_quality(R, ks, space, task_scores))
+            selected = chosen
+            sel_frames.append(q.assign(space=space))
+            print(f"    construction: {selected}  (mean ranks "
+                  + ", ".join(f"{c} {r:.2f}" for c, r in
+                              q.groupby("candidate").mean_rank.first().dropna()
+                               .sort_values().items())
+                  + f")  ({time.time() - t0:.0f}s)", flush=True)
+
+        # Everything that depends on R alone, for every k.
+        ref = clean_reference(R, space, ks, selected)
+        print(f"    clean reference: ER {ref['er']:.1f}, TwoNN {ref['id']:.1f}, "
+              f"d_t {ref['d_t']} ({time.time() - t0:.0f}s)", flush=True)
+
         for n, (dg, sev) in enumerate(conditions):
             G = _load(dataset, f"{dg}_{sev}", space)
             if G is None:
                 print(f"    missing {dg}_{sev}__{space}.npy, skipping", flush=True)
                 continue
             G = prepare(G, space)
-            sG = set_stats(G)
-            for k in ks:
-                r = all_properties(R, G, k=k, space=space, keep_pointwise=perimage,
-                                   sR=sR, sG=sG)
-                pt = r.pop("_pointwise", None)
-                rows.append(dict(degradation=dg, severity=sev,
-                                 space=space, k=k, **r))
+            for k, (r, pt) in zip(ks, condition_properties(R, G, ref, perimage)):
+                rows.append(dict(degradation=dg, severity=sev, space=space, k=k, **r))
                 if pt is not None:
                     # Embeddings are stored in split_ids order, so row i of every
                     # per-point array is image ids[i]. Keeping the id makes this
                     # table joinable to image_metrics_<dataset>.parquet and to the
                     # per-image task tables on the same keys.
-                    blk = pd.DataFrame({c: np.asarray(pt[a], dtype=np.float32)
-                                        for a, c in PT_COLS.items()})
+                    cols = POINT_COLS + [c + "_sel" for c in POINT_SELECTED]
+                    blk = pd.DataFrame({c: np.asarray(pt[c], dtype=np.float32)
+                                        for c in cols if c in pt})
                     blk.insert(0, "k", np.int16(k))
                     blk.insert(0, "space", space)
                     blk.insert(0, "image_id", ids)
@@ -136,6 +118,9 @@ def run_dataset(dataset, spaces, ks, perimage, limit=0):
                 print(f"    [{dataset}/{space}] {n + 1}/{len(conditions)} "
                       f"{dg}/{sev} ({time.time() - t0:.0f}s)", flush=True)
 
+    if save and sel_frames:
+        _write_selection(dataset, sel_frames)
+        print(f"  [{dataset}] selection -> {SELECTION_CSV.name}", flush=True)
     if save and rows:
         D.write_geometry(dataset, rows)
     print(f"  [{dataset}] {len(rows)} rows -> "
@@ -154,8 +139,11 @@ def main():
     ap.add_argument("--spaces", nargs="*", default=SPACES)
     ap.add_argument("--k", nargs="*", type=int, default=KS)
     ap.add_argument("--no-perimage", action="store_true",
-                    help="skip the P3/P4/P5 per-image table. It is written by "
+                    help="skip the per-image table. It is written by "
                          "default for " + ", ".join(C.IMAGE_DATASETS) + ".")
+    ap.add_argument("--no-select", action="store_true",
+                    help="skip the construction selection; the _sel columns "
+                         "then repeat the primary ones")
     ap.add_argument("--limit", type=int, default=0,
                     help="first N conditions only, for a smoke test")
     ap.add_argument("--no-log", action="store_true")
@@ -181,9 +169,10 @@ def main():
 
     C.ANALYSIS_DIR.mkdir(parents=True, exist_ok=True)
     print(f"[geometry] spaces={a.spaces} k={a.k} "
+          f"select={'off' if a.no_select else 'on'} "
           f"perimage={'off' if a.no_perimage else C.IMAGE_DATASETS}", flush=True)
     for d in (C.DATASETS if a.dataset == "all" else [a.dataset]):
-        run_dataset(d, a.spaces, a.k, not a.no_perimage, a.limit)
+        run_dataset(d, a.spaces, a.k, not a.no_perimage, not a.no_select, a.limit)
 
 
 if __name__ == "__main__":

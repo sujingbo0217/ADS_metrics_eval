@@ -1,34 +1,30 @@
-"""The five geometric properties, computed on (R, G) embedding pairs via knn_ext.
+"""Geometric properties computed on (R, G) embedding pairs via knn_ext.
 
-R is the clean set, G the degraded set of one condition. The two are PAIRED:
-row i of G is the degradation of row i of R, which P4 requires.
+R is the clean set, G the corrupted set of one condition. 
+The two are PAIRED:
+row i of G is the corruption of row i of R,
 
-    P1  position   dmu = ||mu_G - mu_R|| / sigma_R,  sigma_R = sqrt(tr(S_R)/d)
-                   baseline 0, with a radial/angular split since a cosine metric
-                   is blind to the radial half by construction.
-    P2  shape      log( ER(G) / ER(R) ),  ER(X) = exp(H(p)), p_i = lam_i/sum lam
-                   baseline 0, negative = directional diversity collapsed.
-    P3  local      log( LID(G) / LID(R) ), TwoNN globally; per-point MLE for the
-                   image-level regressions. baseline 0.
-    P4  neighbors continuity and trustworthiness (Venna & Kaski rank-weighted),
-                   baseline 1. Needs the pairing.
-    P5  mixing     cross-set neighbor fraction over its random-mixing
-                   expectation, baseline 1 (see the ceiling note in p5_mixing).
-
-WHICH KERNEL DOES WHAT
-    set_stats                   P1 and P2, one pass per set
-    lid_profile                 P3, one pooled search feeding both estimators
-    neighborhood_preservation  P4
-    cross_set_mixing            P5
+    GP1 (*) spectral shape    e     = log ER(G) / ER(R)
+    GP2 (*) local scale       rho   = med log r_k(g_i) - med log r_k(r_i)
+            and dimension     delta = log TwoNN(G) / TwoNN(R)
+    GP3     hubness           h     = skew O_k(G) - skew O_k(R)
+            concentration     kappa = log RC(G) / RC(R)
+    GP4     connectivity      tau   = mean_{k in 1,2,3,5} log beta0_G(k) / beta0_R(k)
+    GP5 (*) mixing            m     = other-set share over its random expectation 1/2,
+                                        each point's counterpart excluded
+            support           chi   = log med LID_k(g_i; R \ r_i) / med LID_k(r_i; R \ r_i)
+    GP6     preservation      T, C  = Venna & Kaski trustworthiness and continuity
+            drift             b     = med_i |bary_R(A_i) - bary_R(B_i)| / r_k(r_i)
+    GP7     off-manifold      o     = med nu_i - med nu0_i
 """
+import math
 import sys
 from pathlib import Path
 
 import numpy as np
+from scipy import stats
 
-# The CUDA module is built into build/ and symlinked into python/ by the
-# CMake POST_BUILD rule, neither of which is on sys.path when this is imported
-# from scripts/. Same pattern npy_to_fbin.py uses.
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "python"))
 try:
     import knn_ext
@@ -43,25 +39,39 @@ except ModuleNotFoundError as e:                       # pragma: no cover
         f"knn_ext.cpython-{sys.version_info.major}{sys.version_info.minor}-*.so\n"
         "Build it with:\n"
         "  cd <repo> && rm -rf build && cmake -S . -B build "
-        "-DCMAKE_BUILD_TYPE=Release -DKNN_CUDA_ARCH=<80|86|89|90> "
         "-DPython3_EXECUTABLE=$(which python) "
         "-Dpybind11_DIR=$(python -m pybind11 --cmakedir) && "
         "cmake --build build -j\n"
-        "See README section 1b."
+        "See README, Build."
     ) from e
 
-# Spaces whose metric is cosine: rows are L2-normalised and InnerProduct used.
-#
-# The rule is that the geometry's distance matches the functional the metric
-# family applies to that same space, so that a property and the metric it is
-# compared against are measuring in the same units. CLIP is here because the
-# metric we hold it against, CLIP-sim, is a cosine. dinov2_vitl14 is
-# deliberately NOT here: what we hold it against is FD / KD, which are Frechet
-# and polynomial-MMD on raw unnormalised features, matching dgm-eval. Keeping
-# DINOv2 in L2 also preserves the identity that makes P1 legible -- P1 is the
-# barycenter term of the Frechet distance in the same space, which is only true
-# without the normalisation.
+CN = knn_ext.Construction
+
+
 COSINE_SPACES = {"clip_vitb32", "clip_vit_b32", "vgg_lpips_cosine"}
+
+HEADLINE_COLS = ["gp1_e", "gp2_rho", "gp2_delta", "gp3_h", "gp3_kappa", "gp4_tau",
+                 "gp5_m", "gp5_chi", "gp6_T", "gp6_C", "gp6_b", "gp7_o"]
+
+RELATIONAL_COLS = ["gp3_h", "gp4_tau", "gp5_m", "gp6_T", "gp6_C", "gp6_b"]
+POINT_COLS = ["lid_real", "lid_gen", "rk_real", "rk_gen",      # GP2
+              "occ_gen", "contrast_gen",                       # GP3
+              "mix_real", "mix_gen", "xlid_gen",               # GP5
+              "trust", "cont", "drift",                        # GP6
+              "nu", "nu0"]                                     # GP7
+POINT_SELECTED = ["occ_gen", "mix_real", "mix_gen", "trust", "cont", "drift"]
+
+K_COMPONENTS = (1, 2, 3, 5)     # the sparse graphs GP4 compares
+K_T = 50                        # GP7 local-PCA size, more points than d_t
+
+CANDIDATES = {
+    "primary":       lambda k: (CN.Primary, 0),
+    "snn_k":         lambda k: (CN.SharedNeighbors, k),
+    "snn_2k":        lambda k: (CN.SharedNeighbors, 2 * k),
+    "local_scaling": lambda k: (CN.LocalScaling, k),
+    "geodesic_k/2":  lambda k: (CN.Geodesic, math.ceil(k / 2)),
+    "geodesic_k":    lambda k: (CN.Geodesic, k),
+}
 
 
 def dist_type(space):
@@ -70,7 +80,7 @@ def dist_type(space):
 
 
 def prepare(X, space):
-    """float32 and L2-normalised where the space is cosine.
+    """float32 and L2-normalized where the space is cosine.
 
     The bindings declare every array c_style | forcecast, so dtype and layout
     are numpy's problem now, not ours.
@@ -80,243 +90,185 @@ def prepare(X, space):
     return np.ascontiguousarray(X, dtype=np.float32)
 
 
-def set_stats(X):
-    """(mu, sigma, effective rank) for one set. P1 and P2 both need it."""
-    mu, sigma, eff_rank = knn_ext.set_stats(X)
-    return dict(mu=mu, sigma=sigma, eff_rank=eff_rank)
+def _nb(construction, k):
+    kind, param = CANDIDATES[construction](k)
+    return dict(construction=kind, param=param)
 
 
-# ---------------------------------------------------------------------------
-# P1  position
-# ---------------------------------------------------------------------------
-def p1_position(R, G, sR=None, sG=None):
-    """Centroid displacement in units of the real set's own rms dispersion.
-
-    sigma_R is the PER-AXIS rms spread, so dmu answers "how many typical axis
-    radii did the cloud move". Dividing by sqrt(d) restates it in units of the
-    cloud's total radius; both are reported so the scale is never ambiguous.
-
-    The two centroids and sigma_R come from set_stats; everything below is
-    O(d) arithmetic on a pair of mean vectors, which is not worth a kernel.
-    """
-    sR = sR or set_stats(R)
-    sG = sG or set_stats(G)
-    mu_r, mu_g, sig = sR["mu"], sG["mu"], sR["sigma"]
-    d = R.shape[1]
-    shift = np.linalg.norm(mu_g - mu_r)
-    nr, ng = np.linalg.norm(mu_r), np.linalg.norm(mu_g)
-    return dict(
-        p1_dmu=float(shift / max(sig, 1e-12)),
-        p1_dmu_cloud=float(shift / max(sig * np.sqrt(d), 1e-12)),
-        p1_radial=float(ng / max(nr, 1e-12)),
-        p1_cos=float(mu_r @ mu_g / max(nr * ng, 1e-12)))
+def _log_ratio(a, b):
+    return float(np.log(max(a, 1e-12) / max(b, 1e-12)))
 
 
-# ---------------------------------------------------------------------------
-# P2  shape
-# ---------------------------------------------------------------------------
-def p2_shape(R, G, sR=None, sG=None):
-    """Ratio of effective ranks, Roy & Vetterli (2007).
-
-    ER = exp of the Shannon entropy of the normalised covariance spectrum. Note
-    the ceiling: ER <= min(n-1, d), so at n = 500 no space can report more than
-    499 however wide it is.
-    """
-    sR = sR or set_stats(R)
-    sG = sG or set_stats(G)
-    er_r, er_g = sR["eff_rank"], sG["eff_rank"]
-    return dict(p2_log_er_ratio=float(np.log(er_g / er_r)),
-                p2_er_real=er_r, p2_er_gen=er_g)
+def _nanmedian(x):
+    """Median over the finite entries; NaN, without a warning, if there are none
+    (nu at G = R, where every displacement is zero)."""
+    x = np.asarray(x)
+    x = x[np.isfinite(x)]
+    return float(np.median(x)) if len(x) else np.nan
 
 
-# ---------------------------------------------------------------------------
-# P3  local intrinsic dimension
-# ---------------------------------------------------------------------------
-def p3_local(R, G, k, space):
-    """Per-point Levina-Bickel MLE and the global TwoNN estimate.
+def neighborhood_quality(R, ks, space, task_scores=None):
+    """Q1--Q4 of every candidate at every k, on the clean set only.
 
-    lid_profile runs one pooled search per set at max(k, 3) neighbors and
-    derives both from it: TwoNN always uses the first two neighbors whatever k
-    is, and the bias-corrected MLE needs k >= 3, so it returns NaN per point on
-    the k = 1 corner of the ablation grid while the global figure stands.
+    task_scores maps a model name to its clean per-image task score in row
+    order of R. Where given, Q5 -- the Spearman correlation between an image's
+    score and the mean score of its neighbors -- is added for each model. It
+    is reported and never selected on (Sec. sec:neighborhoods).
     """
     dt = dist_type(space)
-    lid_r, gr = knn_ext.lid_profile(R, k, dt)
-    lid_g, gg = knn_ext.lid_profile(G, k, dt)
-    return dict(p3_log_lid_ratio=float(np.log(max(gg, 1e-9) / max(gr, 1e-9))),
-                p3_lid_real=gr, p3_lid_gen=gg,
-                p3_lid_pt_real=lid_r, p3_lid_pt_gen=lid_g)
+    n = R.shape[0]
+    rows = []
+    for name in CANDIDATES:
+        for k in ks:
+            kind, param = CANDIDATES[name](k)
+            row = dict(candidate=name, k=k, param=param)
+            if k > n - 1 or param > n - 1:
+                rows.append(dict(row, feasible=False))
+                continue
+            try:
+                q = knn_ext.neighborhood_quality(R, k, dt, kind, param)
+            except ValueError:
+                # e.g. a subsample in Q4 too small for k_s
+                rows.append(dict(row, feasible=False))
+                continue
+            row.update(feasible=True, **q)
+            if task_scores:
+                idx = knn_ext.neighbor_lists(R, k, dt, kind, param)
+                for model, y in task_scores.items():
+                    row[f"q5_{model}"] = _q5(idx, y)
+            rows.append(row)
+    return rows
 
 
-# ---------------------------------------------------------------------------
-# P4  neighborhood preservation
-# ---------------------------------------------------------------------------
-def p4_neighborhood(R, G, k, space):
-    """Venna & Kaski continuity and trustworthiness. Baseline 1.
+def _q5(idx, y):
+    """Spearman of y_i against the mean y over i's neighbors (-1 = none)."""
+    y = np.asarray(y, dtype=np.float64)
+    valid = idx >= 0
+    pred = np.where(valid, y[np.where(valid, idx, 0)], 0.0).sum(1)
+    cnt = valid.sum(1)
+    ok = (cnt > 0) & np.isfinite(y)
+    pred = pred[ok] / cnt[ok]
+    return float(stats.spearmanr(pred, y[ok]).statistic) if ok.sum() > 2 else np.nan
 
-    Trustworthiness penalises neighbors that appear in G but were far apart in
-    R (false friends); continuity penalises neighbors that were close in R and
-    got pushed away in G (lost friends). They are not redundant: a degradation
-    that merges distinct scenes scores badly on one, and one that scatters a
-    tight cluster badly on the other.
 
-    Both statistics are sums of a PER-POINT penalty, so the kernel returns that
-    per-point form and the set-level number is its mean. "Was this image's
-    neighborhood preserved" is what tier 2 regresses against.
+def select_construction(quality):
+    """The selection rule of Sec. sec:neighborhoods, on neighborhood_quality rows.
+
+    A candidate is admissible if it is feasible at every k of the sweep and
+    passes Q2 there: no more components than the primary construction, and one
+    component for a geodesic. Among the admissible ones it is the lowest mean
+    rank over Q1 (lower better), Q3 (lower better) and Q4 (higher better), the
+    ranks taken at each k and then averaged over k. Ties go to primary.
+    Returns (name, per-candidate table).
     """
-    t_pt, c_pt = knn_ext.neighborhood_preservation(R, G, k, dist_type(space))
-    return dict(p4_trustworthiness=float(t_pt.mean()),
-                p4_continuity=float(c_pt.mean()),
-                p4_trust_pt=t_pt, p4_cont_pt=c_pt)
+    import pandas as pd
+    q = pd.DataFrame(quality)
+    prim = q[q.candidate == "primary"].set_index("k").components
+    ok = q.feasible & (q.components <= q.k.map(prim))
+    ok &= ~q.candidate.str.startswith("geodesic") | (q.components == 1)
+    q["admissible"] = ok
+    adm = q.groupby("candidate").admissible.all()
+    adm = adm[adm].index
+    a = q[q.candidate.isin(adm)].copy()
+    a["r1"] = a.groupby("k").hub_skew.rank()
+    a["r3"] = a.groupby("k").lid_cv.rank()
+    a["r4"] = a.groupby("k").stability.rank(ascending=False)
+    a["rank"] = a[["r1", "r3", "r4"]].mean(axis=1)
+    mean_rank = a.groupby("candidate")["rank"].mean()
+    order = sorted(mean_rank.index, key=lambda c: (mean_rank[c], c != "primary"))
+    chosen = order[0] if order else "primary"
+    # admissible is per k; a candidate enters the ranking only if it holds at all k
+    q["admissible_all"] = q.candidate.isin(adm)
+    q["mean_rank"] = q.candidate.map(mean_rank)
+    q["selected"] = q.candidate == chosen
+    return chosen, q
 
 
-# ---------------------------------------------------------------------------
-# P5  cross-set mixing
-# ---------------------------------------------------------------------------
-def p5_mixing(R, G, k, space):
-    """kNN form of the Friedman-Rafsky two-sample statistic.
+def clean_reference(R, space, ks, selected="primary", k_t=K_T):
+    dt = dist_type(space)
+    n = R.shape[0]
+    ref = dict(space=space, ks=list(ks), selected=selected, k_t=min(k_t, n - 1))
+    ref["er"] = knn_ext.effective_rank(R)
+    mean_d, nn_d = knn_ext.relative_contrast(R, dt)
+    ref["rc"] = float(mean_d.sum() / nn_d.sum())
+    cons = ["primary"] + ([selected] if selected != "primary" else [])
+    ref["beta0"] = {}
+    for c in cons:
+        for k in ks:
+            ref["beta0"][c, k] = knn_ext.component_counts(R, list(K_COMPONENTS), dt,
+                                                          **_nb(c, k))
+    ref["per_k"] = {}
+    for k in ks:
+        lid, rk, twonn = knn_ext.lid_profile(R, k, dt)
+        d = dict(lid=lid, rk=rk, twonn=float(twonn),
+                 xlid=knn_ext.cross_lid(R, R, k, dt, True))
+        for c in cons:
+            d["occ_skew", c] = float(stats.skew(knn_ext.k_occurrence(R, k, dt, **_nb(c, k))))
+        ref["per_k"][k] = d
+    ref["id"] = ref["per_k"][ks[0]]["twonn"]
+    ref["d_t"] = int(np.clip(round(ref["id"]), 1, ref["k_t"] - 1))
+    k_ref = min(max(ks), ref["k_t"])
+    ref["nu0_all"] = knn_ext.off_manifold_reference(R, k_ref, ref["d_t"], ref["k_t"], dt)
+    return ref
 
-    Each point's k neighbors in R u G are counted by which set they came from
-    and divided by what random mixing would give. 0 means perfectly separable.
-    Used descriptively; no null distribution is fitted.
 
-    CEILING. With PAIRED sets -- ours, where g_i is the degradation of r_i -- the
-    upper end is NOT 1. Each point's own twin is a guaranteed cross-set
-    neighbor, so a perfectly mixed paired sample reads
+def condition_properties(R, G, ref, keep_pointwise=False):
+    """All twelve columns, plus the _sel and extra columns, for every k of ref.
 
-        rho_max = (1 + (k-1)/2) / (k/2) = (k+1)/k
-
-    which is 1.10 at k = 10 and 1.02 at k = 50, and is reproduced to four
-    decimals on duplicate sets. Reading rho > 1 as "more than fully mixed" would
-    be an artefact of the pairing, so p5_rho_scaled divides it out.
+    R and G must be prepared and row-aligned. Returns a list of (row, pointwise)
+    with one entry per k; pointwise is None unless keep_pointwise.
     """
-    pt_real, pt_gen = knn_ext.cross_set_mixing(R, G, k, dist_type(space))
-    rho_r, rho_g = float(pt_real.mean()), float(pt_gen.mean())
-    rho = 0.5 * (rho_r + rho_g)
-    return dict(p5_rho_real=rho_r, p5_rho_gen=rho_g, p5_rho=rho,
-                p5_rho_scaled=rho / ((k + 1) / k), p5_asymmetry=rho_r - rho_g,
-                p5_mix_pt_real=pt_real, p5_mix_pt_gen=pt_gen)
+    space, ks, sel = ref["space"], ref["ks"], ref["selected"]
+    dt = dist_type(space)
+    cons = ["primary"] + ([sel] if sel != "primary" else [])
 
+    er_g = knn_ext.effective_rank(G)
+    mean_d, nn_d = knn_ext.relative_contrast(G, dt)
+    rc_g = float(mean_d.sum() / nn_d.sum())
+    nu = knn_ext.off_manifold(R, G, ref["d_t"], ref["k_t"], dt)
+    base = dict(gp1_e=_log_ratio(er_g, ref["er"]), gp1_er_real=ref["er"], gp1_er_gen=er_g,
+                gp3_kappa=_log_ratio(rc_g, ref["rc"]),
+                gp7_nu=_nanmedian(nu), gp7_d_t=ref["d_t"])
 
-# ---------------------------------------------------------------------------
-# driver
-# ---------------------------------------------------------------------------
-def all_properties(R, G, k=10, space="inception_v3", keep_pointwise=False,
-                   sR=None, sG=None):
-    """All five for one (R, G, k, space). R and G must be row-aligned.
+    out = []
+    for k in ks:
+        rf = ref["per_k"][k]
+        lid_g, rk_g, twonn_g = knn_ext.lid_profile(G, k, dt)
+        xlid_g = knn_ext.cross_lid(R, G, k, dt, True)
+        nu0 = np.median(ref["nu0_all"][:, :min(k, ref["nu0_all"].shape[1])], axis=1)
+        row = dict(base, construction=sel,
+                   gp2_rho=float(np.median(np.log(np.maximum(rk_g, 1e-30)))
+                                 - np.median(np.log(np.maximum(rf["rk"], 1e-30)))),
+                   gp2_delta=_log_ratio(twonn_g, rf["twonn"]),
+                   gp2_id_real=rf["twonn"], gp2_id_gen=float(twonn_g),
+                   gp5_chi=_log_ratio(_nanmedian(xlid_g), _nanmedian(rf["xlid"])),
+                   gp7_nu0=float(np.median(nu0)))
+        row["gp7_o"] = row["gp7_nu"] - row["gp7_nu0"]
+        pt = dict(lid_real=rf["lid"], lid_gen=lid_g, rk_real=rf["rk"], rk_gen=rk_g,
+                  contrast_gen=mean_d / np.maximum(nn_d, 1e-30), xlid_gen=xlid_g,
+                  nu=nu, nu0=nu0)
 
-    sR and sG are set_stats of the PREPARED sets. Neither depends on k, and the
-    clean set's does not depend on the condition either, so a driver sweeping
-    both can compute them once -- see compute_geometry.py. Left out, they are
-    computed here.
-    """
-    R, G = prepare(R, space), prepare(G, space)
-    # P1 and P2 read the same per-set pass, so it happens once per set and not
-    # once per property.
-    sR = sR or set_stats(R)
-    sG = sG or set_stats(G)
-    out = {}
-    out.update(p1_position(R, G, sR, sG))
-    out.update(p2_shape(R, G, sR, sG))
-    p3 = p3_local(R, G, k, space)
-    pt_r, pt_g = p3.pop("p3_lid_pt_real"), p3.pop("p3_lid_pt_gen")
-    out.update(p3)
-    out.update(p4_neighborhood(R, G, k, space))
-    out.update(p5_mixing(R, G, k, space))
-
-    # Three of the five have a per-image form; P1 and P2 do not, exactly as
-    # FID and KID do not on the metric side. A centroid displacement and a
-    # spectral entropy are properties of a SET -- there is no such thing as one
-    # image's share of them. So the scope structure of the geometry mirrors the
-    # scope structure of the metrics, which is what lets tier 2 treat them alike.
-    pt = {"p3_lid_pt_real": pt_r, "p3_lid_pt_gen": pt_g}
-    for key in ("p4_trust_pt", "p4_cont_pt", "p5_mix_pt_real", "p5_mix_pt_gen"):
-        pt[key] = out.pop(key)
-    if keep_pointwise:
-        out["_pointwise"] = pt
+        for c in cons:
+            sfx = "" if c == "primary" else "_sel"
+            nb = _nb(c, k)
+            occ = knn_ext.k_occurrence(G, k, dt, **nb)
+            b0 = knn_ext.component_counts(G, list(K_COMPONENTS), dt, **nb)
+            m_r, m_g = knn_ext.cross_set_mixing(R, G, k, dt, exclude_counterpart=True, **nb)
+            t, cont = knn_ext.neighborhood_preservation(R, G, k, dt, **nb)
+            drift = knn_ext.neighborhood_drift(R, G, k, dt, **nb)
+            row["gp3_h" + sfx] = float(stats.skew(occ)) - rf["occ_skew", c]
+            row["gp4_tau" + sfx] = float(np.mean(np.log(b0 / ref["beta0"][c, k])))
+            row["gp5_m" + sfx] = 0.5 * (float(m_r.mean()) + float(m_g.mean()))
+            row["gp6_T" + sfx] = float(t.mean())
+            row["gp6_C" + sfx] = float(cont.mean())
+            row["gp6_b" + sfx] = float(np.median(drift))
+            if c == "primary":
+                row["gp5_m_real"], row["gp5_m_gen"] = float(m_r.mean()), float(m_g.mean())
+            pt.update({"occ_gen" + sfx: occ / k, "mix_real" + sfx: m_r,
+                       "mix_gen" + sfx: m_g, "trust" + sfx: t, "cont" + sfx: cont,
+                       "drift" + sfx: drift})
+        if sel == "primary":
+            for c in RELATIONAL_COLS:
+                row[c + "_sel"] = row[c]
+        out.append((row, pt if keep_pointwise else None))
     return out
-
-
-# ---------------------------------------------------------------------------
-# self-test: every property against a case whose answer is known in advance,
-# and every kernel against the numpy reference in geometry_ref.py
-# ---------------------------------------------------------------------------
-def _selftest():
-    import geometry_ref as ref
-
-    rng = np.random.default_rng(0)
-    n, d = 600, 40
-    R = rng.normal(size=(n, d)).astype(np.float32)
-    sp = "inception_v3"
-
-    print("P1  baseline and a known shift")
-    print(f"    G = R              dmu = {p1_position(R, R)['p1_dmu']:.4f}   (want 0)")
-    G = R + np.eye(d, dtype=np.float32)[0] * 2      # sigma_R = 1 for N(0, I)
-    print(f"    G = R + 2*e0       dmu = {p1_position(R, G)['p1_dmu']:.4f}   (want 2)")
-
-    print("P2  baseline and a known collapse")
-    print(f"    G = R              log ER = {p2_shape(R, R)['p2_log_er_ratio']:+.4f}   (want 0)")
-    G = R.copy(); G[:, 20:] *= 0.01
-    r = p2_shape(R, G)
-    print(f"    half axes crushed  log ER = {r['p2_log_er_ratio']:+.4f}   "
-          f"(ER {r['p2_er_real']:.1f} -> {r['p2_er_gen']:.1f}, want ~-0.69)")
-
-    print("P3  TwoNN recovers a known dimension (mild low bias is its boundary effect)")
-    for dim in (2, 5, 10):
-        X = rng.uniform(size=(1500, dim)).astype(np.float32)
-        print(f"    uniform in {dim:2d}-d     TwoNN = "
-              f"{knn_ext.lid_profile(X, 3, knn_ext.DistanceType.L2)[1]:5.2f}")
-
-    print("P4  baseline and a known scramble")
-    r = p4_neighborhood(R, R, 10, sp)
-    print(f"    G = R              T = {r['p4_trustworthiness']:.4f}  "
-          f"C = {r['p4_continuity']:.4f}   (want 1, 1)")
-    r = p4_neighborhood(R, R[rng.permutation(n)], 10, sp)
-    print(f"    G = shuffled R     T = {r['p4_trustworthiness']:.4f}  "
-          f"C = {r['p4_continuity']:.4f}   (want ~0.5, chance)")
-
-    print("P5  paired ceiling and a known separation")
-    for k in (5, 10, 20, 50):
-        r = p5_mixing(R, R + 1e-4, k, sp)
-        print(f"    G = R, k = {k:2d}      rho = {r['p5_rho']:.4f}   "
-              f"(want (k+1)/k = {(k+1)/k:.4f})   scaled = {r['p5_rho_scaled']:.4f}")
-    print(f"    G far from R       rho = {p5_mixing(R, R + 500, 10, sp)['p5_rho']:.4f}   (want 0)")
-
-    print("\nkernels against the numpy reference (both metrics, a degradation "
-          "that is neither a no-op nor a scramble)")
-    ok = True
-    for space in ("inception_v3", "clip_vitb32"):
-        A = prepare(R, space)
-        B = prepare(R + 0.4 * rng.normal(size=(n, d)).astype(np.float32), space)
-        for k in (1, 5, 10, 50):
-            got = all_properties(A, B, k=k, space=space, keep_pointwise=True)
-            want = ref.all_properties(A, B, k=k, space=space, keep_pointwise=True)
-            ok &= _compare(got, want, f"{space} k={k}")
-    print("  all within tolerance" if ok else "  MISMATCH -- see above")
-    return ok
-
-
-def _compare(got, want, label, atol=2e-4, rtol=2e-4):
-    """Scalars and per-point arrays, GPU against numpy."""
-    ok = True
-    for key in sorted(want):
-        if key == "_pointwise":
-            continue
-        a, b = got[key], want[key]
-        if not np.isclose(a, b, atol=atol, rtol=rtol, equal_nan=True):
-            print(f"  {label:22s} {key:20s} gpu {a!r} != numpy {b!r}")
-            ok = False
-    for key in sorted(want["_pointwise"]):
-        a = np.asarray(got["_pointwise"][key], dtype=np.float64)
-        b = np.asarray(want["_pointwise"][key], dtype=np.float64)
-        bad = ~np.isclose(a, b, atol=atol, rtol=rtol, equal_nan=True)
-        if bad.any():
-            i = int(np.argmax(bad))
-            print(f"  {label:22s} {key:20s} {bad.sum()}/{len(a)} points differ, "
-                  f"worst at {i}: gpu {a[i]!r} != numpy {b[i]!r}")
-            ok = False
-    return ok
-
-
-if __name__ == "__main__":
-    sys.exit(0 if _selftest() else 1)

@@ -188,11 +188,8 @@ def cityscapes_gt_path(image_id, kind="labelTrainIds"):
 
 
 # -----------------------------------------------------------------------------
-# EMBEDDING SPACES / GEOMETRY
+# SEED, PIXEL SPACE
 # -----------------------------------------------------------------------------
-SPACES = ["inception_v3", "clip_vitb32", "resnet50", "vgg_lpips", 
-            "alexnet_lpips", "pixel", "segformer", "dinov2_vitl14"]
-
 SEED = 2026
 # (H, W) downsample for pixel space
 PIXEL_SIZE = (64, 212)

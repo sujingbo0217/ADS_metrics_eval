@@ -1,19 +1,11 @@
-"""Realism metrics for the two experiments, selected by --level.
+"""Realism metrics at the two levels of Sec. 3 of the paper, selected by --level.
 
-- distribution level: FID, KID, FD@DINOv2, KD@DINOv2.
-    Native set functionals: the clean embedding set of a dataset is compared
-    with the embedding set of one corruption condition as wholes; there is no
-    per-image value. One row per (dataset, condition); the clean condition is
-    evaluated as clean against clean. The same pass caches every embedding
-    space (inception_v3, clip_vitb32, dinov2_vitl14, vgg_lpips, pixel) as
-    float16 under EMB_ROOT/<dataset>/<condition>__<space>.npy, which the image
-    level and the geometry analysis read -- so run this level first.
-    -> ANALYSIS_DIR/distribution_metrics.csv
-         dataset  degradation  severity  FID  KID  FD@DINOv2  KD@DINOv2
+- distribution level: FID, KID, FD@DINOv2, and KD@DINOv2. 
 
-- image level: the 12 metrics on kitti_seg, cityscapes, kitti_depth.
-    kitti_det is excluded because AP has no per-image form. The mean of a
-    column over one condition's images is that metric's condition value.
+- image level: the 12 paired metrics, on raw pixels (MSE, SSIM), hand-crafted
+    features (TSI, WD, KL, HistI), and learned embeddings (Cos@Inc, CLIP-sim,
+    Cos@VGG, LPIPS, CPL, SSS), and the control L2@VGG, on kitti_seg,
+    cityscapes, and kitti_depth.
 
 Usage
     python extract_metrics.py --level [distribution/image] [--dataset all]
@@ -28,6 +20,7 @@ import numpy as np
 import pandas as pd
 import torch
 from PIL import Image
+from scipy.stats import entropy, wasserstein_distance
 
 import config as C
 import data_utils as D
@@ -40,10 +33,16 @@ LOAD_THREADS = 24
 CPU_WORKERS = 48
 CPU_EX = None
 
+
 SPACES = ["inception_v3", "clip_vitb32", "vgg_lpips", "dinov2_vitl14", "pixel"]
 DIST_OUT = D.DISTRIBUTION_METRICS_CSV
+
 CPU_COLS = {"ssim": "SSIM", "tsi": "TSI", "wd": "WD", "kl": "KL", "histi": "HistI"}
 EMB_COLS = {"inception_v3": "Cos@Inc", "clip_vitb32": "CLIP-sim"}
+HANDCRAFTED_SPACES = ["glcm", "density", "density_sorted", "rgb_hist"]
+GLCM_DISTANCES = (1, 2, 3)
+GLCM_PROPS = ("contrast", "dissimilarity", "homogeneity", "energy", "correlation")
+KL_EPS = 1e-10                                # added to every bin by metrics_lib.kl
 
 
 # ---------------------------------------------------------------------------
@@ -94,17 +93,20 @@ def embed_grouped(bb, imgs, batch):
     return z.numpy()
 
 
-def _pixel_worker(job):
-    """Module-level so ProcessPoolExecutor can pickle it. Touches no CUDA."""
+def _cpu_worker(job):
+    """The CPU metrics of one pair and the hand-crafted features of its second
+    image. Module-level so ProcessPoolExecutor can pickle it. Touches no CUDA."""
     a, b, names = job
-    return [M.cpu_pixel(n, a, b) for n in names]
+    return [M.cpu_pixel(n, a, b) for n in names], handcrafted_features(b)
 
 
 def cpu_paired(ref, imgs, names):
-    """Per-image CPU pixel metrics of imgs[j] against ref[j], over every worker."""
+    """Per-image CPU pixel metrics of imgs[j] against ref[j], over every worker,
+    and the hand-crafted features of every imgs[j]."""
     jobs = [(M.to_u8(ref[j]), M.to_u8(imgs[j]), names) for j in range(len(imgs))]
-    v = np.array(list(CPU_EX.map(_pixel_worker, jobs, chunksize=2)))
-    return {n: v[:, i] for i, n in enumerate(names)}
+    out = list(CPU_EX.map(_cpu_worker, jobs, chunksize=2))
+    v = np.array([o[0] for o in out])
+    return {n: v[:, i] for i, n in enumerate(names)}, [o[1] for o in out]
 
 
 # ---------------------------------------------------------------------------
@@ -184,12 +186,27 @@ def emb_cosines(dataset, tag, n):
     return out
 
 
+def vgg_map_sizes(dataset, ids):
+    key = C.DATASETS[dataset]
+    return np.array([M.KerasVGG16.map_size(
+        *Image.open(C.degraded_image_path(key, i, "clean", 0)).size[::-1]) for i in ids],
+        dtype=np.float64)
+
+
+def l2_vgg(cpl, sizes):
+    return M.l2_from_mse(torch.from_numpy(np.asarray(cpl, np.float64)),
+                         torch.from_numpy(sizes)).numpy()
+
+
 def run_image(dataset, bbs, ids, conditions, save, LD):
     batch = BATCH[dataset]
+    sizes = vgg_map_sizes(dataset, ids)
     t0 = time.time()
     clean = load_batch(dataset, ids, "clean", 0, LD)
+    clean_f = cache_features(dataset, "clean_0", list(CPU_EX.map(
+        handcrafted_features, [M.to_u8(x) for x in clean], chunksize=4)), save)
     conditions = [c for c in conditions if c[0] != "clean"]
-    frames = []
+    frames, worst = [], {}
     for k, (dg, sev) in enumerate(conditions):
         imgs = load_batch(dataset, ids, dg, sev, LD)
         vp = {c: np.zeros(len(imgs)) for c in ("LPIPS", "MSE", "Cos@VGG", "CPL", "SSS")}
@@ -203,18 +220,68 @@ def run_image(dataset, bbs, ids, conditions, save, LD):
                 vp["Cos@VGG"][sel] = M.metric("cossim", a, b, bbs["vgg16"])
                 vp["CPL"][sel] = M.metric("cpl", a, b, bbs["vgg16"])
                 vp["SSS"][sel] = M.metric("sss", a, b, bbs["vgg16_raw"])
-        cpu = cpu_paired(clean, imgs, list(CPU_COLS))
+        cpu, feats = cpu_paired(clean, imgs, list(CPU_COLS))
+        check_features(clean_f, cache_features(dataset, f"{dg}_{sev}", feats, save), cpu, worst)
         frames.append(pd.DataFrame(dict(
             degradation=dg, severity=sev, image_id=ids,
             **emb_cosines(dataset, f"{dg}_{sev}", len(ids)), **vp,
-            **{CPU_COLS[n]: v for n, v in cpu.items()})))
+            **{CPU_COLS[n]: v for n, v in cpu.items()},
+            **{"L2@VGG": l2_vgg(vp["CPL"], sizes)})))
         progress(dataset, k, len(conditions), dg, sev, t0)
+    print(f"  [{dataset}] hand-crafted features against the readings, max rel err: "
+          + ", ".join(f"{m} {v:.1e}" for m, v in worst.items()), flush=True)
 
     df = pd.concat(frames, ignore_index=True)[
-        ["degradation", "severity", "image_id", *C.IMAGE_METRICS]]
+        ["degradation", "severity", "image_id", *C.IMAGE_METRICS, *C.CONTROL_METRICS]]
     if save:
         df.to_parquet(D.image_metrics_path(dataset), index=False)
     return f"{D.image_metrics_path(dataset).name} ({len(df):,} rows)"
+
+
+# ---------------------------------------------------------------------------
+# hand-crafted features
+# ---------------------------------------------------------------------------
+def handcrafted_features(rgb):
+    """The features of TSI, KL, WD, and HistI of one image, float64, read in the
+    BGR order in which metrics_lib.cpu_pixel hands images to the metrics."""
+    import cv2
+    from skimage.feature import graycomatrix, graycoprops
+    bgr = np.ascontiguousarray(rgb[..., ::-1])
+    P = graycomatrix(cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY), distances=list(GLCM_DISTANCES),
+                     angles=[0], symmetric=True, normed=True)
+    glcm = np.array([graycoprops(P, p)[d, 0]
+                     for d in range(len(GLCM_DISTANCES)) for p in GLCM_PROPS])
+    dens = np.histogram(bgr.flatten(), bins=256, range=(0, 256), density=True)[0]
+    n = bgr.shape[0] * bgr.shape[1]
+    hist = np.concatenate([np.bincount(bgr[..., c].ravel(), minlength=256) / n for c in range(3)])
+    return glcm, dens, np.sort(dens), hist
+
+
+def rel_err(x, ref):
+    return float(np.max(np.abs(x - ref) / np.maximum(np.abs(ref), 1e-12)))
+
+
+def cache_features(dataset, tag, feats, save):
+    """{space: float64 [N, d]} of one condition, saved as float32 if save."""
+    arr = {s: np.stack([f[j] for f in feats]) for j, s in enumerate(HANDCRAFTED_SPACES)}
+    if save:
+        for s, a in arr.items():
+            np.save(emb_dir(dataset) / f"{tag}__{s}.npy", a.astype(np.float32))
+    return arr
+
+
+def check_features(clean, arr, cpu, worst):
+    """Largest relative error so far of TSI, WD, and KL recomputed from the
+    features against the readings, and of WD from the sorted bin heights."""
+    tsi = np.abs(clean["glcm"] - arr["glcm"]).sum(1)
+    wd = np.array([wasserstein_distance(a, b)
+                   for a, b in zip(clean["density"], arr["density"])])
+    kl = np.array([entropy(a / a.sum() + KL_EPS, b / b.sum() + KL_EPS)
+                   for a, b in zip(clean["density"], arr["density"])])
+    wd_sorted = np.abs(clean["density_sorted"] - arr["density_sorted"]).mean(1)
+    for m, x, ref in (("TSI", tsi, cpu["tsi"]), ("WD", wd, cpu["wd"]),
+                      ("KL", kl, cpu["kl"]), ("WD_sorted", wd_sorted, wd)):
+        worst[m] = max(worst.get(m, 0.0), rel_err(x, ref))
 
 
 # ---------------------------------------------------------------------------

@@ -107,7 +107,6 @@ def image_geometry(dataset):
 
 
 def write_geometry(dataset, rows):
-    """Replace dataset's rows of geometry.csv, conditions in config order."""
     new = pd.DataFrame(rows).assign(dataset=dataset)
     new = new[["dataset", *COND, "space", "k", *GEOMETRY_COLS]]
     if GEOMETRY_CSV.exists():
@@ -116,7 +115,8 @@ def write_geometry(dataset, rows):
             print(f"  {GEOMETRY_CSV.name}: dropping {old.dataset.nunique()} "
                   "dataset(s) written with the previous columns")
             old = old.iloc[0:0]
-        new = pd.concat([old[old.dataset != dataset], new], ignore_index=True)
+        stale = (old.dataset == dataset) & old.space.isin(new.space.unique())
+        new = pd.concat([old[~stale], new], ignore_index=True)
     order = {c: i for i, c in enumerate(C.all_conditions())}
     new = (new.assign(_d=new.dataset.map({d: i for i, d in enumerate(C.DATASETS)}),
                       _c=[order[c] for c in zip(new.degradation, new.severity)])
@@ -126,4 +126,11 @@ def write_geometry(dataset, rows):
 
 
 def write_image_geometry(dataset, frame):
-    frame.to_parquet(image_geometry_path(dataset), index=False)
+    p = image_geometry_path(dataset)
+    if p.exists():
+        old = pd.read_parquet(p)
+        if list(old.columns) != list(frame.columns):
+            raise ValueError(f"{p.name}: columns differ from the new rows; not merging")
+        frame = pd.concat([old[~old.space.isin(frame.space.unique())], frame],
+                          ignore_index=True)
+    frame.to_parquet(p, index=False)

@@ -1,10 +1,3 @@
-"""Unify the metric representation as f = M(img1, img2, space)
-
-Embedding backbones also expose
-    .pooled(x)  -> one vector per image (net(x) returns the same)
-and LpipsBackbone additionally
-    .spatial(x) -> the multi-layer feature maps LPIPS consumes
-"""
 from __future__ import annotations
 
 import functools
@@ -103,6 +96,11 @@ class KerasVGG16:
         assert output in ("block5_conv3", "block5_pool"), output
         self.output, self.preprocess = output, preprocess
         self._convs = _keras_vgg16_convs(os.path.expanduser(weights or self.WEIGHTS))
+
+    @classmethod
+    def map_size(cls, h: int, w: int, output: str = "block5_conv3") -> int:
+        p = 16 if output == "block5_conv3" else 32
+        return cls.WIDTHS[-1] * (h // p) * (w // p)
 
     @torch.no_grad()
     def __call__(self, x01: torch.Tensor) -> torch.Tensor:
@@ -204,6 +202,14 @@ def cosine(img1: torch.Tensor, img2: torch.Tensor) -> torch.Tensor:
     return F.cosine_similarity(img1, img2, dim=1)
 
 
+def l2(img1: torch.Tensor, img2: torch.Tensor) -> torch.Tensor:
+    return torch.linalg.vector_norm(img1.flatten(1) - img2.flatten(1), dim=1)
+
+
+def l2_from_mse(m: torch.Tensor, size) -> torch.Tensor:
+    return torch.sqrt(size * m)
+
+
 @torch.no_grad()
 def lpips(img1: torch.Tensor, img2: torch.Tensor, net: LpipsBackbone) -> torch.Tensor:
     def _normalize_tensor(x, eps=1e-10):
@@ -230,6 +236,11 @@ def cossim(img1: torch.Tensor, img2: torch.Tensor, net) -> torch.Tensor:
 
 
 @torch.no_grad()
+def euclid(img1: torch.Tensor, img2: torch.Tensor, net) -> torch.Tensor:
+    return l2(net(img1).flatten(1), net(img2).flatten(1))
+
+
+@torch.no_grad()
 def cpl(img1: torch.Tensor, img2: torch.Tensor, net) -> torch.Tensor:
     """calculate_perceptual_distances: keras MeanSquaredError of the two
     feature maps, i.e. their mean squared difference."""
@@ -246,6 +257,14 @@ def sss(img1: torch.Tensor, img2: torch.Tensor, net) -> torch.Tensor:
 
 def mse(img1: torch.Tensor, img2: torch.Tensor) -> torch.Tensor:
     return ((img1 - img2) ** 2).flatten(1).mean(dim=1)
+
+
+def psnr_from_mse(m: torch.Tensor, data_range: float = 1.0) -> torch.Tensor:
+    return 10 * torch.log10(data_range ** 2 / m)
+
+
+def psnr(img1: torch.Tensor, img2: torch.Tensor) -> torch.Tensor:
+    return psnr_from_mse(mse(img1, img2))
 
 
 # ---------------------------------------------------------------------------
@@ -335,9 +354,9 @@ def kid(images1: np.ndarray, images2: np.ndarray, n_subsets=100, subset_size=100
 
 # ---------------------------------------------------------------------------
 # metrics that read images through a net: fn(img1, img2, net)
-NET_METRICS = {"lpips": lpips, "cossim": cossim, "cpl": cpl, "sss": sss}
+NET_METRICS = {"lpips": lpips, "cossim": cossim, "euclid": euclid, "cpl": cpl, "sss": sss}
 # pixel metrics computed on the GPU from float [0, 1] images
-GPU_PIXEL = {"mse": mse}
+GPU_PIXEL = {"mse": mse, "psnr": psnr}
 # pixel metrics computed on the CPU from uint8 BGR images, as L&S compute them
 CPU_PIXEL = {"ssim": ssim, "tsi": tsi, "wd": wd, "kl": kl, "histi": histi}
 
