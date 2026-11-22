@@ -1,19 +1,12 @@
-//   set_stats                    P1 position, P2 shape      (one pass, shared moment)
-//   lid_profile                  P3 local intrinsic dimension
-//   neighborhood_preservation   P4 continuity and trustworthiness
-//   cross_set_mixing             P5 cross-set neighbor share
-//
-// barycenter_shift, neighbor_overlap and compute_indegree implemented the
-// PREVIOUS five-property design. They are not earlier versions of the four
-// above -- barycenter_shift measured a per-point distance to a local centroid,
-// where P1 measures a single global centroid displacement, so it is a different
-// quantity rather than a coarser one. Kept as the record of what was replaced,
-// and because the argument for the current design is partly that these were
-// tried.
+//   effective_rank              GP1 spectral shape
+//   lid_profile, compute_lid    GP2 local scale and dimension
+//   relative_contrast           GP3 concentration (hubness: neighborhood.cu)
+//   cross_set_mixing, cross_lid GP5 mixing and support
+//   neighborhood_preservation   GP6 trustworthiness and continuity
+//   neighborhood_drift          GP6 drift
 
-#include "geometry.h"
+#include "geometry_common.cuh"
 #include "cuda_check.h"
-#include "device_buffer.h"
 
 #include <cstddef>
 #include <cub/cub.cuh>
@@ -46,15 +39,13 @@ static cusolverDnHandle_t cusolver_handle() {
   return h;
 }
 
-static constexpr int kBlock = 256;
-static inline int grid_for(size_t n, int block = kBlock) {
-  size_t g = (n + block - 1) / block;
-  return (int)(g > 65535 ? 65535 : (g ? g : 1));
+__global__ void fill_nan_kernel(float* x, int n) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) x[i] = nanf("");
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// P1 position and P2 shape
-// sigma, mu
+// GP1 spectral shape
 // ───────────────────────────────────────────────────────────────────────────
 
 __global__ void col_sum_kernel(const float* __restrict__ X, int n, int dim,
@@ -79,23 +70,6 @@ __global__ void reduce_partial_kernel(const double* __restrict__ partial, int ch
   out[d] = s * scale;
 }
 
-// sum over ALL elements of (x[i,d] - mu[d])^2, one partial per block.
-__global__ void sq_dev_kernel(const float* __restrict__ X, const double* __restrict__ mu,
-                              size_t total, int dim, double* __restrict__ partial) {
-  double s = 0.0;
-  const size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
-  for (size_t i = idx; i < total; i += (size_t)gridDim.x * blockDim.x) {
-    double v = (double)X[i] - mu[i % dim];
-    s += v * v;
-  }
-  typedef cub::BlockReduce<double, kBlock> Reduce;
-  __shared__ typename Reduce::TempStorage tmp;
-  double tot = Reduce(tmp).Sum(s);
-  if (threadIdx.x == 0) {
-    partial[blockIdx.x] = tot;
-  }
-}
-
 // Center a chunk of consecutive ROWS into double. Row-major (c, dim) is the
 // same linear layout as column-major (dim, c), so this block is A[:, i0:i0+c]
 // with no transpose.
@@ -105,7 +79,7 @@ __global__ void stage_rows_kernel(const float* __restrict__ X, const double* __r
   const size_t dd = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
   const float* __restrict__ tmp = X + (size_t)i0 * dim;
   for (size_t d = dd; d < dim; d += (size_t)gridDim.x * blockDim.x) {
-    const double m = mu[d]; 
+    const double m = mu[d];
     for (int r = blockIdx.y; r < rows; r += gridDim.y) {
       const size_t offset = (size_t)r * dim + d;
       out[offset] = (double)tmp[offset] - m;
@@ -137,16 +111,13 @@ static dim3 grid_2d(int fast_dim, int slow_dim, int block, int target_blocks = 2
   return dim3(gx, gy);
 }
 
-// exp of the Shannon entropy of the normalized covariance spectrum.
-//
-// Roy & Vetterli (2007). The spectrum is taken from the SMALLER of the two
-// Gram matrices: X_c^T X_c is (dim, dim) and X_c X_c^T is (n, n), they share
-// their non-zero eigenvalues, and there are min(n, dim) of them either way --
-// the same count numpy's SVD of the centered block returns. Accumulated in
-// float64 because the tail of the spectrum is what the entropy is sensitive
-// to, and a float32 GEMM leaves nothing below ~1e-6 of the leading eigenvalue
-// that is not rounding noise.
-static double effective_rank(const float* d_X, int n, int dim, const double* d_mu) {
+// The spectrum is taken from the SMALLER of the two Gram matrices: X_c^T X_c is
+// (dim, dim) and X_c X_c^T is (n, n), they share their non-zero eigenvalues,
+// and there are min(n, dim) of them either way -- the same count numpy's SVD
+// of the centered block returns. Accumulated in float64 because the tail of
+// the spectrum is what the entropy is sensitive to, and a float32 GEMM leaves
+// nothing below ~1e-6 of the leading eigenvalue that is not rounding noise.
+static double effective_rank_device(const float* d_X, int n, int dim, const double* d_mu) {
   const int m = n < dim ? n : dim;
   DeviceArray<double> M((size_t)m * m);
   M.zero();
@@ -222,7 +193,7 @@ static double effective_rank(const float* d_X, int n, int dim, const double* d_m
   return std::exp(h);
 }
 
-SetStats set_stats(const float* X, int n, int dim, double* mu_host) {
+double effective_rank(const float* X, int n, int dim) {
   DeviceArray<float> d_X;
   d_X.from_host(X, (size_t)n * dim);
 
@@ -235,45 +206,12 @@ SetStats set_stats(const float* X, int n, int dim, double* mu_host) {
   reduce_partial_kernel<<<(dim + kBlock - 1) / kBlock, kBlock>>>(
       partial.get(), chunks, dim, 1.0 / n, d_mu.get());
   CUDA_CHECK_KERNEL();
-
-  const size_t total = (size_t)n * dim;
-  const int nblk = grid_for(total);
-  DeviceArray<double> sq(nblk);
-  sq_dev_kernel<<<nblk, kBlock>>>(d_X.get(), d_mu.get(), total, dim, sq.get());
-  CUDA_CHECK_KERNEL();
-  std::vector<double> h_sq(nblk);
-  sq.to_host(h_sq.data());
-  double ss = 0.0;
-  for (double v : h_sq) ss += v;
-
-  SetStats out;
-  // Per-AXIS rms spread: the mean squared deviation is over n points and dim
-  // axes, so the divisor is n * dim.
-  out.sigma = std::sqrt(ss / ((double)n * dim));
-  out.eff_rank = effective_rank(d_X.get(), n, dim, d_mu.get());
-  if (mu_host) d_mu.to_host(mu_host);
-  return out;
+  return effective_rank_device(d_X.get(), n, dim, d_mu.get());
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// P3 local intrinsic dimension
+// GP2 local scale and dimension
 // ───────────────────────────────────────────────────────────────────────────
-
-// knn_ext's raw output -> true Euclidean distance, in place. L2 is squared and
-// InnerProduct is a negative dot product; for the unit-norm rows the cosine
-// spaces use, ||a-b||^2 = 2 + 2*ip.
-__global__ void true_distance_kernel(float* d, size_t total, int is_ip) {
-  const size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
-  for (size_t i = idx; i < total; i += (size_t)gridDim.x * blockDim.x) {
-    float v = d[i];
-    d[i] = is_ip ? sqrtf(fmaxf(2.0f + 2.0f * v, 0.0f)) : sqrtf(fmaxf(v, 0.0f));
-  }
-}
-
-__global__ void fill_nan_kernel(float* x, int n) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i < n) x[i] = nanf("");
-}
 
 // mu_i = d2/d1, or -1 where the point is unusable. Facco's estimator keeps
 // only ratios above 1; a coincident pair gives d1 = 0 and no ratio at all.
@@ -338,7 +276,7 @@ static double twonn_from_distances(const float* d_dist, int n, int ld) {
 // DistanceType::L2 produces, and not the negative dot products that
 // DistanceType::InnerProduct produces. Squared input halves the estimate,
 // since ln(d_i^2/d_k^2) = 2 ln(d_i/d_k); negative input makes the logs NaN.
-// true_distance_kernel in geometry.cu performs that conversion on the device.
+// to_true_distance performs that conversion on the device.
 __global__ void compute_lid_kernel(const float *dist, int n_q, int k, int ld, float *output) {
   // dist sorted ascending, row stride ld >= k
   int qi = blockIdx.x * blockDim.x + threadIdx.x;
@@ -384,8 +322,14 @@ void compute_lid(const float *dist, int n_q, int k, int ld, float *output) {
   CUDA_CHECK_KERNEL();
 }
 
+__global__ void column_kernel(const float* __restrict__ m, int n, int ld, int col,
+                              float* __restrict__ out) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) out[i] = m[(size_t)i * ld + col];
+}
+
 double lid_profile(const float* X, int n, int dim, int k, DistanceType dist_type,
-                   float* lid_pt) {
+                   float* lid_pt, float* rk_pt) {
   DeviceArray<float> d_X;
   d_X.from_host(X, (size_t)n * dim);
 
@@ -393,10 +337,7 @@ double lid_profile(const float* X, int n, int dim, int k, DistanceType dist_type
   int kk = k > 3 ? k : 3;
   if (kk > n - 1) kk = n - 1;
   knnResult res = mixed_knn(d_X.get(), n, dim, kk, dist_type);
-
-  true_distance_kernel<<<grid_for((size_t)n * kk), kBlock>>>(
-      res.distances, (size_t)n * kk, dist_type == DistanceType::InnerProduct);
-  CUDA_CHECK_KERNEL();
+  to_true_distance(res.distances, (size_t)n * kk, dist_type);
 
   if (lid_pt) {
     // The bias-corrected MLE sums k-1 log-ratios and divides by k-2, so it is
@@ -408,13 +349,128 @@ double lid_profile(const float* X, int n, int dim, int k, DistanceType dist_type
       compute_lid(res.distances, n, k, kk, lid_pt);
     }
   }
+  if (rk_pt) {
+    column_kernel<<<grid_for(n), kBlock>>>(res.distances, n, kk, k - 1, rk_pt);
+    CUDA_CHECK_KERNEL();
+  }
   double twonn = twonn_from_distances(res.distances, n, kk);
   free_knn_result(res);
   return twonn;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// P4 neighborhood preservation
+// GP3 concentration
+// ───────────────────────────────────────────────────────────────────────────
+
+// One block per row of a masked true-distance matrix.
+__global__ void contrast_kernel(const float* __restrict__ D, int n,
+                                float* __restrict__ mean_pt, float* __restrict__ nn_pt) {
+  const float* row = D + (size_t)blockIdx.x * n;
+  double s = 0.0;
+  float mn = INFINITY;
+  for (int j = threadIdx.x; j < n; j += blockDim.x) {
+    float v = row[j];
+    if (v < 1e30f) {
+      s += v;
+      mn = fminf(mn, v);
+    }
+  }
+  typedef cub::BlockReduce<double, kBlock> RD;
+  typedef cub::BlockReduce<float, kBlock> RF;
+  __shared__ typename RD::TempStorage t1;
+  __shared__ typename RF::TempStorage t2;
+  double tot = RD(t1).Sum(s);
+  float m = RF(t2).Reduce(mn, cub::Min());
+  if (threadIdx.x == 0) {
+    mean_pt[blockIdx.x] = (float)(tot / (n - 1));
+    nn_pt[blockIdx.x] = m;
+  }
+}
+
+void relative_contrast(const float* X, int n, int dim, DistanceType dist_type,
+                       float* mean_pt, float* nn_pt) {
+  DeviceArray<float> d_X;
+  d_X.from_host(X, (size_t)n * dim);
+  Neighborhood primary;
+  primary.dist = dist_type;
+  DeviceArray<float> D;
+  construction_matrix(d_X.get(), n, dim, primary, 0, D);
+  contrast_kernel<<<n, kBlock>>>(D.get(), n, mean_pt, nn_pt);
+  CUDA_CHECK_KERNEL();
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// GP5 cross-set mixing and support
+// ───────────────────────────────────────────────────────────────────────────
+
+__global__ void mixing_kernel(const int* __restrict__ neighbors, int n_r, int n_g, int k,
+                              int excl, float* __restrict__ pt_real,
+                              float* __restrict__ pt_gen) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  int N = n_r + n_g;
+  if (i >= N) return;
+  int from_gen = 0;
+  for (int j = 0; j < k; j++) from_gen += (neighbors[(size_t)i * k + j] >= n_r);
+  double frac = (double)from_gen / k;
+  // Divided by what random mixing would give: each candidate is equally
+  // likely, and the excluded counterpart is one fewer candidate of the other
+  // set, so the expected share is (n_other - excl) / (N - 1 - excl).
+  const double cand = (double)(N - 1 - excl);
+  if (i < n_r) pt_real[i] = (float)(frac / ((double)(n_g - excl) / cand));
+  else pt_gen[i - n_r] = (float)((1.0 - frac) / ((double)(n_r - excl) / cand));
+}
+
+void cross_set_mixing(const float* R, const float* G, int n_r, int n_g, int dim, int k,
+                      const Neighborhood& nb, bool exclude_counterpart,
+                      float* pt_real, float* pt_gen) {
+  const int N = n_r + n_g;
+  // Stacked on the device. The Python side used to np.vstack, which copies both
+  // sets on the host before the same bytes cross the bus anyway.
+  DeviceArray<float> Z((size_t)N * dim);
+  CUDA_CHECK(cudaMemcpy(Z.get(), R, (size_t)n_r * dim * sizeof(float),
+                        cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(Z.get() + (size_t)n_r * dim, G,
+                        (size_t)n_g * dim * sizeof(float), cudaMemcpyHostToDevice));
+
+  const int excl = exclude_counterpart ? 1 : 0;
+  DeviceArray<float> D;
+  construction_matrix(Z.get(), N, dim, nb, excl ? n_r : 0, D);
+  knnResult res = knn_from_matrix(D.get(), N, N, k, -1);
+  D.free();
+  mixing_kernel<<<grid_for(N), kBlock>>>(res.indices, n_r, n_g, k, excl, pt_real, pt_gen);
+  CUDA_CHECK_KERNEL();
+  free_knn_result(res);
+}
+
+__global__ void mask_rows_self_kernel(float* D, int rows, int ld) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < rows) D[(size_t)i * ld + i] = INFINITY;
+}
+
+void cross_lid(const float* R, const float* G, int n_r, int n_g, int dim, int k,
+               DistanceType dist_type, bool exclude_counterpart, float* lid_g) {
+  if (k < 3) {
+    fill_nan_kernel<<<grid_for(n_g), kBlock>>>(lid_g, n_g);
+    CUDA_CHECK_KERNEL();
+    return;
+  }
+  DeviceArray<float> d_R, d_G;
+  d_R.from_host(R, (size_t)n_r * dim);
+  d_G.from_host(G, (size_t)n_g * dim);
+  DeviceArray<float> D((size_t)n_g * n_r);
+  pairwise_distances(d_R.get(), d_G.get(), n_r, n_g, dim, dist_type, D.get());
+  to_true_distance(D.get(), (size_t)n_g * n_r, dist_type);
+  if (exclude_counterpart) {
+    mask_rows_self_kernel<<<grid_for(n_g), kBlock>>>(D.get(), n_g, n_r);
+    CUDA_CHECK_KERNEL();
+  }
+  knnResult res = knn_from_matrix(D.get(), n_g, n_r, k, -1);
+  compute_lid(res.distances, n_g, k, k, lid_g);
+  free_knn_result(res);
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// GP6 neighborhood preservation and drift
 // ───────────────────────────────────────────────────────────────────────────
 
 __global__ void row_iota_kernel(int* v, int n) {
@@ -428,11 +484,6 @@ __global__ void row_iota_kernel(int* v, int n) {
 __global__ void row_offsets_kernel(int* off, int n) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i <= n) off[i] = i * n;
-}
-
-__global__ void mask_diagonal_kernel(float* D, int n) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i < n) D[(size_t)i * n + i] = INFINITY;
 }
 
 // rank[i, order[i, j]] = j + 1, so 1 is the nearest. Self sits at rank n,
@@ -449,7 +500,7 @@ __global__ void scatter_rank_kernel(const int* __restrict__ order, int* __restri
 }
 
 // One block per point. Both statistics are sums of a per-point penalty, so the
-// per-point form is the summand carrying its share of the normaliser -- the
+// per-point form is the summand carrying its share of the normalizer -- the
 // same baseline 1, and an image-level answer to "was this neighborhood
 // preserved", which is what the tier-2 regression needs.
 __global__ void trust_cont_kernel(const int* __restrict__ rank_R,
@@ -476,35 +527,34 @@ __global__ void trust_cont_kernel(const int* __restrict__ rank_R,
   }
 }
 
-// Rows of `dist` -> ranks. The distance matrix is consumed, the ranks are kept.
-static void ranks_from(const float* d_X, int n, int dim, DistanceType dist_type,
-                       DeviceArray<float>& dist, DeviceArray<float>& dist_out,
-                       DeviceArray<int>& idx_in, DeviceArray<int>& idx_out,
-                       DeviceArray<char>& tmp, size_t tmp_bytes,
-                       const int* offsets, int* rank) {
-  pairwise_distances(d_X, d_X, n, n, dim, dist_type, dist.get());
-  mask_diagonal_kernel<<<grid_for(n), kBlock>>>(dist.get(), n);
-  CUDA_CHECK_KERNEL();
+// Rows of the construction matrix -> ranks. The matrix is consumed, the ranks
+// are kept.
+static void ranks_from(const float* d_X, int n, int dim, const Neighborhood& nb,
+                       DeviceArray<float>& dist_out, DeviceArray<int>& idx_in,
+                       DeviceArray<int>& idx_out, DeviceArray<char>& tmp,
+                       size_t tmp_bytes, const int* offsets, int* rank) {
+  DeviceArray<float> D;
+  construction_matrix(d_X, n, dim, nb, 0, D);
   row_iota_kernel<<<grid_for((size_t)n * n), kBlock>>>(idx_in.get(), n);
   CUDA_CHECK_KERNEL();
   // Radix sort is stable, which is what makes these ranks reproduce numpy's
   // argsort(kind="stable") tie for tie.
   size_t bytes = tmp_bytes;
   CUDA_CHECK(cub::DeviceSegmentedRadixSort::SortPairs(
-      tmp.get(), bytes, dist.get(), dist_out.get(), idx_in.get(), idx_out.get(),
+      tmp.get(), bytes, D.get(), dist_out.get(), idx_in.get(), idx_out.get(),
       n * n, n, offsets, offsets + 1));
   scatter_rank_kernel<<<grid_for((size_t)n * n), kBlock>>>(idx_out.get(), rank, n);
   CUDA_CHECK_KERNEL();
 }
 
 void neighborhood_preservation(const float* R, const float* G, int n, int dim, int k,
-                                DistanceType dist_type, float* t_pt, float* c_pt) {
+                               const Neighborhood& nb, float* t_pt, float* c_pt) {
   DeviceArray<float> d_R, d_G;
   d_R.from_host(R, (size_t)n * dim);
   d_G.from_host(G, (size_t)n * dim);
 
   const size_t nn = (size_t)n * n;
-  DeviceArray<float> dist(nn), dist_out(nn);
+  DeviceArray<float> dist_out(nn);
   DeviceArray<int> idx_in(nn), idx_out(nn);
   DeviceArray<int> offsets(n + 1);
   row_offsets_kernel<<<grid_for(n + 1), kBlock>>>(offsets.get(), n);
@@ -512,26 +562,25 @@ void neighborhood_preservation(const float* R, const float* G, int n, int dim, i
 
   size_t tmp_bytes = 0;
   CUDA_CHECK(cub::DeviceSegmentedRadixSort::SortPairs(
-      nullptr, tmp_bytes, dist.get(), dist_out.get(), idx_in.get(), idx_out.get(),
-      n * n, n, offsets.get(), offsets.get() + 1));
+      nullptr, tmp_bytes, (const float*)nullptr, dist_out.get(), idx_in.get(),
+      idx_out.get(), n * n, n, offsets.get(), offsets.get() + 1));
   DeviceArray<char> tmp(tmp_bytes);
 
   DeviceArray<int> rank_R(nn), rank_G(nn);
-  ranks_from(d_R.get(), n, dim, dist_type, dist, dist_out, idx_in, idx_out, tmp,
-             tmp_bytes, offsets.get(), rank_R.get());
-  ranks_from(d_G.get(), n, dim, dist_type, dist, dist_out, idx_in, idx_out, tmp,
-             tmp_bytes, offsets.get(), rank_G.get());
-  dist.free();
+  ranks_from(d_R.get(), n, dim, nb, dist_out, idx_in, idx_out, tmp, tmp_bytes,
+             offsets.get(), rank_R.get());
+  ranks_from(d_G.get(), n, dim, nb, dist_out, idx_in, idx_out, tmp, tmp_bytes,
+             offsets.get(), rank_G.get());
   dist_out.free();
   idx_in.free();
   idx_out.free();
   tmp.free();
 
-  // Venna & Kaski's normaliser is the worst-case error sum and has TWO branches
+  // Venna & Kaski's normalizer is the worst-case error sum and has TWO branches
   // (Lee & Verleysen 2009, eq. 4):
   //     G_K = N K (2N - 3K - 1)    K <  N/2
   //           N (N-K)(N-K-1)       K >= N/2
-  // Only the first is reachable on our grid (largest k = 50 against smallest
+  // Only the first is reachable on our grid (largest k = 100 against smallest
   // n = 200), but using it unconditionally would silently return values outside
   // [0, 1] for anyone who widened k.
   double gk = (k < n / 2.0) ? (double)n * k * (2.0 * n - 3.0 * k - 1.0)
@@ -541,64 +590,92 @@ void neighborhood_preservation(const float* R, const float* G, int n, int dim, i
   CUDA_CHECK_KERNEL();
 }
 
-// ───────────────────────────────────────────────────────────────────────────
-// P5 cross-set mixing
-// ───────────────────────────────────────────────────────────────────────────
-
-__global__ void mixing_kernel(const int* __restrict__ neighbors, int n_r, int n_g, int k,
-                              float* __restrict__ pt_real, float* __restrict__ pt_gen) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  int N = n_r + n_g;
-  if (i >= N) return;
-  int from_gen = 0;
-  for (int j = 0; j < k; j++) from_gen += (neighbors[(size_t)i * k + j] >= n_r);
-  double frac = (double)from_gen / k;
-  // Divided by what random mixing would give: each of the other N-1 points is
-  // equally likely, so the expected share is n_other / (N - 1).
-  if (i < n_r) pt_real[i] = (float)(frac / ((double)n_g / (N - 1)));
-  else pt_gen[i - n_r] = (float)((1.0 - frac) / ((double)n_r / (N - 1)));
+// One block per point: || sum_{A_i} r - sum_{B_i} r || / (k r_k(r_i)). The
+// shared members of A_i and B_i cancel, but summing both in full keeps the
+// kernel branch-free and costs 2k reads per coordinate.
+__global__ void drift_kernel(const float* __restrict__ R, int n, int dim, int k,
+                             const int* __restrict__ A, const int* __restrict__ B,
+                             const float* __restrict__ rk, float* __restrict__ b_pt) {
+  extern __shared__ int lists[];   // 2k
+  const int i = blockIdx.x;
+  for (int t = threadIdx.x; t < k; t += blockDim.x) {
+    lists[t] = A[(size_t)i * k + t];
+    lists[k + t] = B[(size_t)i * k + t];
+  }
+  __syncthreads();
+  double ss = 0.0;
+  for (int d = threadIdx.x; d < dim; d += blockDim.x) {
+    double s = 0.0;
+    for (int t = 0; t < k; t++) {
+      s += (double)R[(size_t)lists[t] * dim + d];
+      s -= (double)R[(size_t)lists[k + t] * dim + d];
+    }
+    ss += s * s;
+  }
+  typedef cub::BlockReduce<double, kBlock> Reduce;
+  __shared__ typename Reduce::TempStorage tmp;
+  double tot = Reduce(tmp).Sum(ss);
+  if (threadIdx.x == 0) {
+    float r = rk[i];
+    b_pt[i] = r > 0.0f ? (float)(sqrt(tot) / k / r) : nanf("");
+  }
 }
 
-void cross_set_mixing(const float* R, const float* G, int n_r, int n_g, int dim, int k,
-                      DistanceType dist_type, float* pt_real, float* pt_gen) {
-  const int N = n_r + n_g;
-  // Stacked on the device. The Python side used to np.vstack, which copies both
-  // sets on the host before the same bytes cross the bus anyway.
-  DeviceArray<float> Z((size_t)N * dim);
-  CUDA_CHECK(cudaMemcpy(Z.get(), R, (size_t)n_r * dim * sizeof(float),
-                        cudaMemcpyHostToDevice));
-  CUDA_CHECK(cudaMemcpy(Z.get() + (size_t)n_r * dim, G,
-                        (size_t)n_g * dim * sizeof(float), cudaMemcpyHostToDevice));
+void neighborhood_drift(const float* R, const float* G, int n, int dim, int k,
+                        const Neighborhood& nb, float* b_pt) {
+  DeviceArray<float> d_R, d_G;
+  d_R.from_host(R, (size_t)n * dim);
+  d_G.from_host(G, (size_t)n * dim);
 
-  knnResult res = mixed_knn(Z.get(), N, dim, k, dist_type);
-  mixing_kernel<<<grid_for(N), kBlock>>>(res.indices, n_r, n_g, k, pt_real, pt_gen);
+  knnResult a, b;
+  {
+    DeviceArray<float> D;
+    construction_matrix(d_R.get(), n, dim, nb, 0, D);
+    a = knn_from_matrix(D.get(), n, n, k, -1);
+    construction_matrix(d_G.get(), n, dim, nb, 0, D);
+    b = knn_from_matrix(D.get(), n, n, k, -1);
+  }
+  // The radius is r_k under the primary distance, whatever nb is.
+  knnResult p = mixed_knn(d_R.get(), n, dim, k, nb.dist);
+  to_true_distance(p.distances, (size_t)n * k, nb.dist);
+  DeviceArray<float> rk(n);
+  column_kernel<<<grid_for(n), kBlock>>>(p.distances, n, k, k - 1, rk.get());
   CUDA_CHECK_KERNEL();
-  free_knn_result(res);
+
+  drift_kernel<<<n, kBlock, 2 * k * sizeof(int)>>>(d_R.get(), n, dim, k, a.indices,
+                                                    b.indices, rk.get(), b_pt);
+  CUDA_CHECK_KERNEL();
+  free_knn_result(a);
+  free_knn_result(b);
+  free_knn_result(p);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Superseded: the previous five-property design.
+// Superseded: the first property design.
 //
-// Replaced as follows, and note that none of the three is simply an older form
-// of its successor:
+// None of the three is simply an older form of a present property:
 //
-//   barycenter_shift  per-point distance to the centroid of that point's k
+//   barycenter_shift  per-point distance from a query to the centroid of its k
 //                     nearest REAL neighbors
-//                     -> P1, the displacement of the whole cloud's centroid,
-//                        normalised by the real set's own dispersion. A global
-//                        quantity where this was a local one.
+//                     -> the second design replaced it with a global centroid
+//                        displacement, since dropped as the mean term of the
+//                        Frechet distance. GP6's drift reinstates a local
+//                        barycenter, but compares two neighborhoods of the same
+//                        clean point rather than a point with one neighborhood.
 //
 //   neighbor_overlap  unweighted fraction of a real point's k-NN that survive
 //                     in the pooled graph
-//                     -> P4, which weights each lost or intruding neighbor by
-//                        how far out of place it ended up, and splits the two
-//                        error types that this number conflates.
+//                     -> GP6 trustworthiness and continuity, which weight each
+//                        lost or intruding neighbor by how far out of place it
+//                        ended up, and split the two error types that this
+//                        number conflates.
 //
 //   compute_indegree  in-degree of each node in the pooled k-NN graph, reported
 //                     as real-vs-synthetic means
-//                     -> P5, which asks the same separability question directly
-//                        and normalises by what random mixing would give, so it
-//                        has a baseline instead of two numbers to compare.
+//                     -> GP5 mixing, which asks the same separability question
+//                        directly and normalizes by what random mixing would
+//                        give, and GP3 hubness, which reads the in-degree
+//                        distribution against the clean one.
 //
 // compute_lid is NOT here: it remains live above, called by lid_profile.
 // ═══════════════════════════════════════════════════════════════════════════

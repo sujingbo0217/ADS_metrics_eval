@@ -7,16 +7,12 @@
 #include <cstdlib>
 #include <cublas_v2.h>
 
-// declared in pairwise_dist.cu
 extern void pairwise_l2_dist(cublasHandle_t, const float*, const float*, int, int, int, float*);
 extern void pairwise_ip_dist(cublasHandle_t, const float*, const float*, int, int, int, float*);
 extern __global__ void pairwise_mahalanobis_kernel(const float*, const float*, const float*, float*, int, int, int);
 
-// declared in search.cu
 extern __global__ void topk_search_kernel(const float*, int*, float*, int, int, int, int);
 
-// The distance dispatch was copied verbatim between cross_set_knn and
-// mixed_knn, which differ only in self-exclusion. One copy, two callers.
 static void fill_distance_matrix(
   const float* base, const float* query, int n_b, int n_q, int dim,
   DistanceType dist_type, const float* inv_cov, float* dist
@@ -61,7 +57,10 @@ static knnResult topk(
 
   DeviceArray<float> dist((size_t)n_q * n_b);
   fill_distance_matrix(base, query, n_b, n_q, dim, dist_type, inv_cov, dist.get());
+  return knn_from_matrix(dist.get(), n_q, n_b, k, offset);
+}
 
+knnResult knn_from_matrix(const float* dist, int n_q, int n_b, int k, int offset) {
   knnResult res;
   res.n_q = n_q;
   res.k = k;
@@ -71,7 +70,7 @@ static knnResult topk(
   const int block_size = 128;
   const int grid_size = (n_q + block_size - 1) / block_size;
   topk_search_kernel<<<grid_size, block_size>>>(
-      dist.get(), res.indices, res.distances, n_b, n_q, k, offset);
+      dist, res.indices, res.distances, n_b, n_q, k, offset);
   CUDA_CHECK_KERNEL();
   return res;
 }

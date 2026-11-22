@@ -1,11 +1,5 @@
 #pragma once
-// Scope-bound device memory, and the two library handles.
-//
-// Every entry point in this library used to cudaMalloc by hand and cudaFree on
-// the way out. That leaks on any early return, and pybind11 turns a bad
-// argument into a C++ exception thrown straight through the middle of such a
-// function, so the leak was reachable from Python. DeviceArray frees in its
-// destructor and is non-copyable, which makes both impossible.
+
 #include "cuda_check.h"
 
 #include <cublas_v2.h>
@@ -57,11 +51,6 @@ class DeviceArray {
   size_t n_ = 0;
 };
 
-// One handle per process instead of one per call. cublasCreate initialises a
-// CUDA context on first use, which cost more than several of the kernels it was
-// wrapping; cross_set_knn, mixed_knn and pairwise_distances each created and
-// destroyed one on every invocation, and the geometry driver invokes them
-// thousands of times.
 cublasHandle_t knn_cublas_handle();
 
 #define CUBLAS_CHECK(expr)                                                    \

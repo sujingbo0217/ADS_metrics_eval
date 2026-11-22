@@ -1,14 +1,5 @@
 #pragma once
-// Fail loudly. Nothing in this library checked a CUDA return code, and the
-// consequence was not a crash but silent wrong answers: a module built for
-// sm_89 and loaded on an sm_80 A100 fails EVERY hand-written kernel launch with
-// cudaErrorNoKernelImageForDevice, leaves the output buffer as cudaMalloc
-// returned it (zeros), and reports nothing. cuBLAS keeps working, because it
-// ships a fat binary for every architecture -- so the GEMM-based results looked
-// plausible while every kernel-based result was zero.
-//
-// CUDA_CHECK wraps an API call; CUDA_CHECK_KERNEL follows a <<<>>> launch and
-// catches both the launch error and, after a synchronise, the execution error.
+
 #include <cstdio>
 #include <cstdlib>
 #include <cuda_runtime.h>

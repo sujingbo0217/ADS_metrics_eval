@@ -2,23 +2,19 @@
 #include "device_buffer.h"
 #include "geometry.h"
 #include "knn.h"
-#include "geometry.h"
 #include "utils.h"
 
 #include <cuda_runtime.h>
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace py = pybind11;
 
-// Every array crossing this boundary is declared c_style | forcecast, so numpy
-// converts float64, Fortran-order and sliced views before we see a pointer.
-// Without it a non-contiguous or float64 array was read as raw bytes and the
-// caller got silent nonsense, which is why the Python side was littered with
-// np.ascontiguousarray().
 using Farray = py::array_t<float, py::array::c_style | py::array::forcecast>;
 using Iarray = py::array_t<int, py::array::c_style | py::array::forcecast>;
 
@@ -32,8 +28,6 @@ static void check_matrix(const py::buffer_info& b, const char* name) {
     throw py::value_error(std::string(name) + " is empty");
 }
 
-// Everything here goes through an (n_q, n_b) distance matrix, whose elements
-// the kernels and CUB's segment count address with a signed int.
 static void check_matrix_fits(long long n_q, long long n_b) {
   if (n_q * n_b > 2147483647LL)
     throw py::value_error("the " + std::to_string(n_q) + " x " + std::to_string(n_b) +
@@ -139,8 +133,7 @@ static py::tuple py_mixed_knn(Farray X, int k, DistanceType dist_type,
   return py::make_tuple(neighbors, distances);
 }
 
-// ─── Local Intrinsic Dimensionality ───
-// Levina-Bickel MLE from k-NN distances that are already TRUE distances.
+// LID
 static py::array_t<float> py_compute_lid(Farray dist, int k) {
   auto b = dist.request();
   check_matrix(b, "dist");
@@ -155,7 +148,6 @@ static py::array_t<float> py_compute_lid(Farray dist, int k) {
   return download(out, {n_q});
 }
 
-// ─── L2 row normalization ───
 static py::array_t<float> py_l2_normalize_rows(Farray X) {
   auto b = X.request();
   check_matrix(b, "X");
@@ -166,10 +158,6 @@ static py::array_t<float> py_l2_normalize_rows(Farray X) {
   return download(d_X, {n, dim});
 }
 
-// ─── Full pairwise distance matrix ───
-// Diagnostic. The properties that need ranks derive them on the device; pulling
-// an n x n matrix across the bus to sort it on the host is what this rewrite
-// removed from P4.
 static py::array_t<float> py_pairwise_distances(Farray base, py::object query,
                                                 DistanceType dist_type) {
   auto b = base.request();
@@ -197,81 +185,227 @@ static py::array_t<float> py_pairwise_distances(Farray base, py::object query,
   return download(out, {n_q, n_b});
 }
 
-// ─── P1 position, P2 shape ───
-static py::tuple py_set_stats(Farray X) {
-  auto b = X.request();
-  check_matrix(b, "X");
-  const int n = (int)b.shape[0], dim = (int)b.shape[1];
+// ─── Geometric properties ───
 
-  auto mu = py::array_t<double>(dim);
-  SetStats s = set_stats(static_cast<const float*>(b.ptr), n, dim, mu.mutable_data());
-  return py::make_tuple(mu, s.sigma, s.eff_rank);
+static std::pair<int, int> matrix_shape(const Farray& a, const char* name) {
+  auto b = a.request();
+  check_matrix(b, name);
+  return {(int)b.shape[0], (int)b.shape[1]};
 }
 
-// ─── P3 local intrinsic dimension ───
+static const float* host_ptr(const Farray& a) { return static_cast<const float*>(a.data()); }
+
+// A construction over N points. Each one materializes an (N, N) matrix, and
+// the geodesic pads it to a multiple of 32.
+static Neighborhood make_neighborhood(DistanceType dist_type, Construction kind, int param,
+                                      int N) {
+  if (dist_type == DistanceType::Mahalanobis)
+    throw py::value_error("the geometric properties take L2 or InnerProduct");
+  const long long P = ((long long)N + 31) / 32 * 32;
+  check_matrix_fits(P, P);
+  if (kind != Construction::Primary && (param < 1 || param > N - 2))
+    throw py::value_error("construction parameter " + std::to_string(param) +
+                          " out of range: need 1 <= param <= " + std::to_string(N - 2));
+  Neighborhood nb;
+  nb.dist = dist_type;
+  nb.kind = kind;
+  nb.param = param;
+  return nb;
+}
+
+static void check_same_dim(int a, int b) {
+  if (a != b) throw py::value_error("R and G must have the same dimension");
+}
+
+static void check_paired_shapes(std::pair<int, int> r, std::pair<int, int> g) {
+  if (r != g)
+    throw py::value_error("R and G must have the same shape: row i of both is the "
+                          "same image. Got (" + std::to_string(r.first) + ", " +
+                          std::to_string(r.second) + ") and (" +
+                          std::to_string(g.first) + ", " + std::to_string(g.second) + ")");
+}
+
+static py::array_t<int> py_neighbor_lists(Farray X, int k, DistanceType dist_type,
+                                          Construction kind, int param) {
+  auto [n, dim] = matrix_shape(X, "X");
+  Neighborhood nb = make_neighborhood(dist_type, kind, param, n);
+  check_k(k, n - 1);
+  DeviceArray<int> idx((size_t)n * k);
+  neighbor_lists(host_ptr(X), n, dim, k, nb, idx.get());
+  return download(idx, {n, k});
+}
+
+static py::dict py_neighborhood_quality(Farray X, int k, DistanceType dist_type,
+                                        Construction kind, int param, int n_draws,
+                                        double drop, unsigned seed) {
+  auto [n, dim] = matrix_shape(X, "X");
+  Neighborhood nb = make_neighborhood(dist_type, kind, param, n);
+  check_k(k, n - 1);
+  if (k < 3) throw py::value_error("Q3 needs the pointwise LID, defined for k >= 3");
+  if (!(drop > 0.0 && drop < 1.0)) throw py::value_error("drop must lie in (0, 1)");
+  NeighborhoodQuality q =
+      neighborhood_quality(host_ptr(X), n, dim, k, nb, n_draws, drop, seed);
+  py::dict d;
+  d["hub_skew"] = q.hub_skew;
+  d["components"] = q.components;
+  d["lid_cv"] = q.lid_cv;
+  d["stability"] = q.stability;
+  return d;
+}
+
+// (*) GP1 spectral shape
+static double py_effective_rank(Farray X) {
+  auto [n, dim] = matrix_shape(X, "X");
+  return effective_rank(host_ptr(X), n, dim);
+}
+
+// (*) GP2 local scale and dimension
 static py::tuple py_lid_profile(Farray X, int k, DistanceType dist_type) {
-  auto b = X.request();
-  check_matrix(b, "X");
-  const int n = (int)b.shape[0], dim = (int)b.shape[1];
+  auto [n, dim] = matrix_shape(X, "X");
   check_matrix_fits(n, n);
   check_k(k, n - 1);
-
-  DeviceArray<float> lid(n);
-  double twonn = lid_profile(static_cast<const float*>(b.ptr), n, dim, k, dist_type,
-                             lid.get());
-  return py::make_tuple(download(lid, {n}), twonn);
+  DeviceArray<float> lid(n), rk(n);
+  double twonn = lid_profile(host_ptr(X), n, dim, k, dist_type, lid.get(), rk.get());
+  return py::make_tuple(download(lid, {n}), download(rk, {n}), twonn);
 }
 
-// ─── P4 neighborhood preservation ───
-static py::tuple py_neighborhood_preservation(Farray R, Farray G, int k,
-                                               DistanceType dist_type) {
-  auto rb = R.request(), gb = G.request();
-  check_matrix(rb, "R");
-  check_matrix(gb, "G");
-  check_paired(rb, gb);
-  const int n = (int)rb.shape[0], dim = (int)rb.shape[1];
-  check_matrix_fits(n, n);
+// GP3 hubness and concentration
+static py::array_t<int> py_k_occurrence(Farray X, int k, DistanceType dist_type,
+                                        Construction kind, int param) {
+  auto [n, dim] = matrix_shape(X, "X");
+  Neighborhood nb = make_neighborhood(dist_type, kind, param, n);
   check_k(k, n - 1);
-
-  DeviceArray<float> t(n), c(n);
-  neighborhood_preservation(static_cast<const float*>(rb.ptr),
-                             static_cast<const float*>(gb.ptr), n, dim, k, dist_type,
-                             t.get(), c.get());
-  return py::make_tuple(download(t, {n}), download(c, {n}));
+  DeviceArray<int> occ(n);
+  k_occurrence(host_ptr(X), n, dim, k, nb, occ.get());
+  return download(occ, {n});
 }
 
-// ─── P5 cross-set mixing ───
-static py::tuple py_cross_set_mixing(Farray R, Farray G, int k, DistanceType dist_type) {
-  auto rb = R.request(), gb = G.request();
-  check_matrix(rb, "R");
-  check_matrix(gb, "G");
-  if (rb.shape[1] != gb.shape[1])
-    throw py::value_error("R and G must have the same dimension");
-  const int n_r = (int)rb.shape[0], n_g = (int)gb.shape[0], dim = (int)rb.shape[1];
-  check_matrix_fits(n_r + n_g, n_r + n_g);
-  check_k(k, n_r + n_g - 1);
+static py::tuple py_relative_contrast(Farray X, DistanceType dist_type) {
+  auto [n, dim] = matrix_shape(X, "X");
+  make_neighborhood(dist_type, Construction::Primary, 0, n);
+  if (n < 2) throw py::value_error("relative contrast needs at least two points");
+  DeviceArray<float> mean(n), nn(n);
+  relative_contrast(host_ptr(X), n, dim, dist_type, mean.get(), nn.get());
+  return py::make_tuple(download(mean, {n}), download(nn, {n}));
+}
 
+// GP4 connectivity
+static py::array_t<int> py_component_counts(Farray X, std::vector<int> ks,
+                                            DistanceType dist_type, Construction kind,
+                                            int param) {
+  auto [n, dim] = matrix_shape(X, "X");
+  Neighborhood nb = make_neighborhood(dist_type, kind, param, n);
+  if (ks.empty()) throw py::value_error("ks is empty");
+  for (int k : ks) check_k(k, n - 1);
+  py::array_t<int> out((py::ssize_t)ks.size());
+  component_counts(host_ptr(X), n, dim, nb, ks.data(), (int)ks.size(), out.mutable_data());
+  return out;
+}
+
+// (*) GP5 cross-set mixing
+static py::tuple py_cross_set_mixing(Farray R, Farray G, int k, DistanceType dist_type,
+                                     Construction kind, int param,
+                                     bool exclude_counterpart) {
+  auto r = matrix_shape(R, "R");
+  auto g = matrix_shape(G, "G");
+  check_same_dim(r.second, g.second);
+  if (exclude_counterpart) check_paired_shapes(r, g);
+  const int n_r = r.first, n_g = g.first, dim = r.second;
+  Neighborhood nb = make_neighborhood(dist_type, kind, param, n_r + n_g);
+  check_k(k, n_r + n_g - 1 - (exclude_counterpart ? 1 : 0));
   DeviceArray<float> pr(n_r), pg(n_g);
-  cross_set_mixing(static_cast<const float*>(rb.ptr), static_cast<const float*>(gb.ptr),
-                   n_r, n_g, dim, k, dist_type, pr.get(), pg.get());
+  cross_set_mixing(host_ptr(R), host_ptr(G), n_r, n_g, dim, k, nb, exclude_counterpart, pr.get(), pg.get());
   return py::make_tuple(download(pr, {n_r}), download(pg, {n_g}));
 }
 
-PYBIND11_MODULE(knn_ext, m) {
-  m.doc() = "CUDA k-NN and geometric-property kernels";
+static py::array_t<float> py_cross_lid(Farray R, Farray G, int k, DistanceType dist_type,
+                                       bool exclude_counterpart) {
+  auto r = matrix_shape(R, "R");
+  auto g = matrix_shape(G, "G");
+  check_same_dim(r.second, g.second);
+  if (exclude_counterpart) check_paired_shapes(r, g);
+  const int n_r = r.first, n_g = g.first, dim = r.second;
+  make_neighborhood(dist_type, Construction::Primary, 0, 1);
+  check_matrix_fits(n_g, n_r);
+  check_k(k, n_r - (exclude_counterpart ? 1 : 0));
+  DeviceArray<float> lid(n_g);
+  cross_lid(host_ptr(R), host_ptr(G), n_r, n_g, dim, k, dist_type, exclude_counterpart, lid.get());
+  return download(lid, {n_g});
+}
 
-  // barycenter_shift, neighbor_overlap and compute_indegree were bound here.
-  // They implemented the previous five-property design and nothing in the
-  // current pipeline calls them; leaving them exposed invited the reading that
-  // they were part of it. The implementations are kept, commented, at the end
-  // of src/graph.cu.
+// GP6 neighborhood preservation and drift
+static py::tuple py_neighborhood_preservation(Farray R, Farray G, int k,
+                                              DistanceType dist_type, Construction kind,
+                                              int param) {
+  auto r = matrix_shape(R, "R");
+  check_paired_shapes(r, matrix_shape(G, "G"));
+  const int n = r.first, dim = r.second;
+  Neighborhood nb = make_neighborhood(dist_type, kind, param, n);
+  check_k(k, n - 1);
+  DeviceArray<float> t(n), c(n);
+  neighborhood_preservation(host_ptr(R), host_ptr(G), n, dim, k, nb, t.get(), c.get());
+  return py::make_tuple(download(t, {n}), download(c, {n}));
+}
+
+static py::array_t<float> py_neighborhood_drift(Farray R, Farray G, int k,
+                                                DistanceType dist_type, Construction kind,
+                                                int param) {
+  auto r = matrix_shape(R, "R");
+  check_paired_shapes(r, matrix_shape(G, "G"));
+  const int n = r.first, dim = r.second;
+  Neighborhood nb = make_neighborhood(dist_type, kind, param, n);
+  check_k(k, n - 1);
+  DeviceArray<float> b(n);
+  neighborhood_drift(host_ptr(R), host_ptr(G), n, dim, k, nb, b.get());
+  return download(b, {n});
+}
+
+// GP7 off-manifold displacement
+static void check_tangent(int n, int k_t, int d_t) {
+  if (k_t < 1 || k_t > 63 || k_t > n - 1)
+    throw py::value_error("k_t = " + std::to_string(k_t) +
+                          " out of range: need 1 <= k_t <= min(63, n - 1)");
+  if (d_t < 1) throw py::value_error("d_t must be at least 1");
+}
+
+static py::array_t<float> py_off_manifold(Farray R, Farray G, int d_t, int k_t,
+                                          DistanceType dist_type) {
+  auto r = matrix_shape(R, "R");
+  check_paired_shapes(r, matrix_shape(G, "G"));
+  const int n = r.first, dim = r.second;
+  make_neighborhood(dist_type, Construction::Primary, 0, n);
+  check_tangent(n, k_t, d_t);
+  DeviceArray<float> nu(n);
+  off_manifold(host_ptr(R), host_ptr(G), n, dim, k_t, d_t, dist_type, nu.get());
+  return download(nu, {n});
+}
+
+static py::array_t<float> py_off_manifold_reference(Farray R, int k, int d_t, int k_t,
+                                                    DistanceType dist_type) {
+  auto [n, dim] = matrix_shape(R, "R");
+  make_neighborhood(dist_type, Construction::Primary, 0, n);
+  check_tangent(n, k_t, d_t);
+  if (k < 1 || k > k_t)
+    throw py::value_error("k = " + std::to_string(k) + " must lie in [1, k_t]");
+  DeviceArray<float> nu0((size_t)n * k);
+  off_manifold_reference(host_ptr(R), n, dim, k, k_t, d_t, dist_type, nu0.get());
+  return download(nu0, {n, k});
+}
+
+PYBIND11_MODULE(knn_ext, m) {
+  m.doc() = "CUDA k-NN, neighborhood constructions, and the geometric properties GP1--GP7";
 
   py::enum_<DistanceType>(m, "DistanceType")
     .value("L2", DistanceType::L2)
     .value("InnerProduct", DistanceType::InnerProduct)
     .value("Mahalanobis", DistanceType::Mahalanobis);
 
-  // ── k-NN search ──
+  py::enum_<Construction>(m, "Construction")
+    .value("Primary", Construction::Primary)
+    .value("SharedNeighbors", Construction::SharedNeighbors)
+    .value("LocalScaling", Construction::LocalScaling)
+    .value("Geodesic", Construction::Geodesic);
+
   m.def("cross_set_knn", &py_cross_set_knn,
         "Cross-set exact k-NN: for each query, k nearest neighbors in base",
         py::arg("base"), py::arg("query"), py::arg("k"),
@@ -295,31 +429,86 @@ PYBIND11_MODULE(knn_ext, m) {
         "Row-wise L2 normalization (returns a copy)",
         py::arg("X"));
 
-  // ── The five geometric properties ──
-  m.def("set_stats", &py_set_stats,
-        "P1 and P2 in one pass over the set: (mu (dim,) float64, sigma, eff_rank). "
-        "sigma is the per-axis rms dispersion; eff_rank is exp of the entropy of "
-        "the normalised covariance spectrum.",
+  m.def("neighbor_lists", &py_neighbor_lists,
+        "(n, k) neighbors of every row under a construction, self excluded, "
+        "nearest first.",
+        py::arg("X"), py::arg("k"), py::arg("dist_type") = DistanceType::L2,
+        py::arg("construction") = Construction::Primary, py::arg("param") = 0);
+
+  m.def("neighborhood_quality", &py_neighborhood_quality,
+        "Task-free quality criteria of a construction on one cloud: dict with "
+        "hub_skew (Q1), components (Q2), lid_cv (Q3), stability (Q4).",
+        py::arg("X"), py::arg("k"), py::arg("dist_type") = DistanceType::L2,
+        py::arg("construction") = Construction::Primary, py::arg("param") = 0,
+        py::arg("n_draws") = 10, py::arg("drop") = 0.2, py::arg("seed") = 0u);
+
+  m.def("effective_rank", &py_effective_rank,
+        "GP1: exp of the entropy of the normalized covariance spectrum.",
         py::arg("X"));
 
   m.def("lid_profile", &py_lid_profile,
-        "P3: (per-point Levina-Bickel LID at width k, global TwoNN estimate). "
-        "One mixed search serves both; per-point values are NaN for k < 3.",
+        "GP2: (per-point Levina-Bickel LID at width k, per-point true distance to "
+        "the k-th neighbor, global TwoNN estimate). Primary distance; per-point LID "
+        "is NaN for k < 3.",
         py::arg("X"), py::arg("k"), py::arg("dist_type") = DistanceType::L2);
 
-  m.def("neighborhood_preservation", &py_neighborhood_preservation,
-        "P4: per-point (trustworthiness, continuity), Venna & Kaski, baseline 1. "
-        "R and G must be row-aligned.",
-        py::arg("R"), py::arg("G"), py::arg("k"),
-        py::arg("dist_type") = DistanceType::L2);
+  m.def("k_occurrence", &py_k_occurrence,
+        "GP3 hubness: (n,) k-occurrence of every row under a construction.",
+        py::arg("X"), py::arg("k"), py::arg("dist_type") = DistanceType::L2,
+        py::arg("construction") = Construction::Primary, py::arg("param") = 0);
+
+  m.def("relative_contrast", &py_relative_contrast,
+        "GP3 concentration: per-point (mean distance to the other points, nearest "
+        "distance), primary true distance. RC = sum(mean) / sum(nearest).",
+        py::arg("X"), py::arg("dist_type") = DistanceType::L2);
+
+  m.def("component_counts", &py_component_counts,
+        "GP4: connected components of the symmetrized k-NN graph for each k in ks.",
+        py::arg("X"), py::arg("ks"), py::arg("dist_type") = DistanceType::L2,
+        py::arg("construction") = Construction::Primary, py::arg("param") = 0);
 
   m.def("cross_set_mixing", &py_cross_set_mixing,
-        "P5: per-point cross-set neighbor share over its random-mixing "
-        "expectation, for the real rows and the generated rows.",
+        "GP5: per-point cross-set neighbor share over its random-mixing "
+        "expectation, for the real rows and the generated rows. With "
+        "exclude_counterpart, row i of R and row i of G never see each other.",
         py::arg("R"), py::arg("G"), py::arg("k"),
+        py::arg("dist_type") = DistanceType::L2,
+        py::arg("construction") = Construction::Primary, py::arg("param") = 0,
+        py::arg("exclude_counterpart") = true);
+
+  m.def("cross_lid", &py_cross_lid,
+        "GP5: per-row LID of G from its k nearest rows of R (Barua et al. 2019), "
+        "primary distance, own clean row excluded with exclude_counterpart.",
+        py::arg("R"), py::arg("G"), py::arg("k"),
+        py::arg("dist_type") = DistanceType::L2,
+        py::arg("exclude_counterpart") = true);
+
+  m.def("neighborhood_preservation", &py_neighborhood_preservation,
+        "GP6: per-point (trustworthiness, continuity), Venna & Kaski, baseline 1, "
+        "under a construction. R and G must be row-aligned.",
+        py::arg("R"), py::arg("G"), py::arg("k"),
+        py::arg("dist_type") = DistanceType::L2,
+        py::arg("construction") = Construction::Primary, py::arg("param") = 0);
+
+  m.def("neighborhood_drift", &py_neighborhood_drift,
+        "GP6: per-point distance between the clean barycenters of the clean and "
+        "the corrupted neighborhoods, in units of the clean k-NN radius.",
+        py::arg("R"), py::arg("G"), py::arg("k"),
+        py::arg("dist_type") = DistanceType::L2,
+        py::arg("construction") = Construction::Primary, py::arg("param") = 0);
+
+  m.def("off_manifold", &py_off_manifold,
+        "GP7: per-point off-tangent fraction of g_i - r_i, tangent = top-d_t local "
+        "PCA of r_i and its k_t primary neighbors.",
+        py::arg("R"), py::arg("G"), py::arg("d_t"), py::arg("k_t") = 50,
         py::arg("dist_type") = DistanceType::L2);
 
-  // ── Graph properties, used by the superseded python/pipeline.py ──
+  m.def("off_manifold_reference", &py_off_manifold_reference,
+        "GP7 reference: (n, k) off-tangent fractions of r_j - r_i for the first k "
+        "neighbors j, each left out of the tangent estimate. nu0 = row median.",
+        py::arg("R"), py::arg("k"), py::arg("d_t"), py::arg("k_t") = 50,
+        py::arg("dist_type") = DistanceType::L2);
+
   m.def("compute_lid", &py_compute_lid,
         "Levina-Bickel LID from TRUE k-NN distances sorted ascending. Reads the "
         "first k of the array's columns.",
