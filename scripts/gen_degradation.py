@@ -17,7 +17,7 @@ PNG to avoid double-compression interactions (jpeg_compression severity is part
 of the degradation itself, not the storage format).
 
 Usage:
-    python gen_degradation.py --task [det/seg] [--workers 16]
+    python gen_degradation.py --task [det/seg/cityscapes] [--workers 16]
 """
 import argparse
 import hashlib

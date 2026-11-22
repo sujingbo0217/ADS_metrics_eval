@@ -1,7 +1,7 @@
 """Compute geometric properties
 
 Usage:
-    python compute_geometry.py --dataset all
+    python compute_geometry.py
     python compute_geometry.py --dataset kitti_seg --spaces inception_v3 --k 10
 """
 import argparse
@@ -18,7 +18,10 @@ from geometry_lib import (POINT_COLS, POINT_SELECTED, clean_reference,
                           condition_properties, neighborhood_quality, prepare,
                           select_construction)
 
-SPACES = ["inception_v3", "clip_vitb32", "vgg_lpips", "dinov2_vitl14", "pixel"]
+SPACES = [
+    "inception_v3", "clip_vitb32", "vgg_lpips", "dinov2_vitl14", "pixel",
+    "glcm", "density", "density_sorted", "rgb_hist",
+]
 KS = [5, 10, 20, 50, 100]
 SELECTION_CSV = C.ANALYSIS_DIR / "geometry_selection.csv"
 

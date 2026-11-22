@@ -9,8 +9,6 @@ examines the geometry of the representations used by these metrics.
 ## Setup
 
 ```bash
-git clone git@github.com:sujingbo0217/ADS_metrics_eval.git
-cd ADS_metrics_eval
 conda create -n ads python=3.10 -y
 conda activate ads
 pip install -r requirements.txt
@@ -209,11 +207,11 @@ Run the stages below in order. `RESULTS` and `EMB_ROOT`
 refer to the paths defined in `scripts/config.py`; analysis files are written to
 `results/analysis/` unless otherwise noted.
 
-Importing `scripts/config.py` automatically creates `results/analysis/`,
+<!-- Importing `scripts/config.py` automatically creates `results/analysis/`,
 `results/logs/`, `EMB_ROOT`, `RESULTS/task_perf/`, and `RESULTS/logs/`, including
 their parent directories. Degradation, embedding-cache, and detection-condition
 directories are created as needed. The RQ scripts create their own analysis
-subdirectories.
+subdirectories. -->
 
 | Stage | Script or command | Main outputs |
 | --- | --- | --- |
